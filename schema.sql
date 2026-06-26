@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS events (
     season_id      INTEGER NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
     round_number   INTEGER NOT NULL,
     round_label    TEXT,                        -- raw label, e.g. 'Round 28/MX Championship Round'
+    region_250     TEXT,                        -- SX only: 'E' | 'W' | 'EW' (showdown)
     venue          TEXT,
     city           TEXT,
     state          TEXT,
@@ -168,3 +169,4 @@ CREATE TABLE IF NOT EXISTS standings (
 -- ---------------------------------------------------------------------------
 
 ALTER TABLE events ADD COLUMN IF NOT EXISTS round_label TEXT;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS region_250 TEXT;

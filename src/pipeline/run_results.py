@@ -100,7 +100,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--smx-id", help="ingest only this SuperMotocross event id")
     ap.add_argument("--limit", type=int, help="cap the number of events")
+    ap.add_argument("--recompute-only", action="store_true",
+                    help="rebuild standings from existing results (no scraping)")
     args = ap.parse_args()
+
+    if args.recompute_only:
+        with get_connection() as conn:
+            recompute_standings(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT season_id FROM standings")
+                season_ids = [row[0] for row in cur.fetchall()]
+            print("Standings recomputed.")
+            print_standings(conn, season_ids)
+        return
 
     adapter = ResultsHTMLAdapter()
     with get_connection() as conn:

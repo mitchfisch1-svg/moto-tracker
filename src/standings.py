@@ -31,64 +31,89 @@ def points_for(series_abbrev: str, position) -> int:
     return table.get(int(position), 0)
 
 
+def standings_class(series_abbrev, cls, home_region):
+    """The championship a result counts toward.
+
+    Supercross 250 is two regional championships; everything else keeps its class.
+    """
+    if series_abbrev == "SX" and cls == "250":
+        return {"E": "250 East", "W": "250 West"}.get(home_region, "250")
+    return cls
+
+
 def recompute_standings(conn, season_id: int | None = None) -> int:
     """Rebuild standings (points/wins/podiums/position) from results.
 
     If season_id is given, only that season is recomputed; otherwise all.
     Returns the number of standings rows written.
+
+    Supercross 250 results are split into '250 East' / '250 West' by each rider's
+    home region (the region of the non-showdown rounds they raced), so showdown
+    points land in the right regional championship.
     """
     where_season = "AND se.id = %s" if season_id is not None else ""
     params = (season_id,) if season_id is not None else ()
 
     with conn.cursor() as cur:
-        # Clear the seasons we're about to rebuild so removed results disappear.
+        cur.execute(
+            f"""
+            SELECT se.id, s.abbrev, sess.class, e.region_250,
+                   r.rider_id, r.position, r.points
+            FROM results r
+            JOIN sessions sess ON sess.id = r.session_id
+            JOIN events   e    ON e.id    = sess.event_id
+            JOIN seasons  se   ON se.id   = e.season_id
+            JOIN series   s    ON s.id    = se.series_id
+            WHERE sess.type = ANY(%s)
+              AND r.rider_id IS NOT NULL
+              AND r.points IS NOT NULL
+              {where_season}
+            """,
+            (list(SCORING_TYPES), *params),
+        )
+        rows = cur.fetchall()
+
+    # Home region: the E/W of a rider's non-showdown SX 250 rounds.
+    home_region: dict[int, str] = {}
+    for _sid, abbrev, cls, region, rider, _pos, _pts in rows:
+        if abbrev == "SX" and cls == "250" and region in ("E", "W"):
+            home_region[rider] = region
+
+    # Aggregate per (season, standings_class, rider).
+    agg: dict[tuple, list] = {}
+    for sid, abbrev, cls, _region, rider, position, points in rows:
+        sclass = standings_class(abbrev, cls, home_region.get(rider))
+        bucket = agg.setdefault((sid, sclass, rider), [0, 0, 0])
+        bucket[0] += points
+        bucket[1] += 1 if position == 1 else 0
+        bucket[2] += 1 if position and position <= 3 else 0
+
+    # Rank within each (season, class) by points.
+    position_of: dict[tuple, int] = {}
+    by_group: dict[tuple, list] = {}
+    for key in agg:
+        by_group.setdefault((key[0], key[1]), []).append(key)
+    for group_keys in by_group.values():
+        group_keys.sort(key=lambda k: agg[k][0], reverse=True)
+        for rank, key in enumerate(group_keys, start=1):
+            position_of[key] = rank
+
+    with conn.cursor() as cur:
         if season_id is not None:
             cur.execute("DELETE FROM standings WHERE season_id = %s", (season_id,))
         else:
             cur.execute("DELETE FROM standings")
 
-        cur.execute(
-            f"""
-            INSERT INTO standings
-                (season_id, class, rider_id, points, wins, podiums, updated_at)
-            SELECT se.id,
-                   s.class,
-                   r.rider_id,
-                   SUM(r.points)                       AS points,
-                   SUM((r.position = 1)::int)          AS wins,
-                   SUM((r.position <= 3)::int)         AS podiums,
-                   now()
-            FROM results r
-            JOIN sessions s ON s.id = r.session_id
-            JOIN events   e ON e.id = s.event_id
-            JOIN seasons  se ON se.id = e.season_id
-            WHERE s.type = ANY(%s)
-              AND r.rider_id IS NOT NULL
-              AND r.points IS NOT NULL
-              {where_season}
-            GROUP BY se.id, s.class, r.rider_id
-            """,
-            (list(SCORING_TYPES), *params),
-        )
-        written = cur.rowcount
-
-        # Rank within each (season, class) by points.
-        cur.execute(
-            f"""
-            WITH ranked AS (
-                SELECT id,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY season_id, class ORDER BY points DESC
-                       ) AS rn
-                FROM standings se
-                WHERE TRUE {('AND se.season_id = %s' if season_id is not None else '')}
+        for (sid, sclass, rider), (points, wins, podiums) in agg.items():
+            cur.execute(
+                """
+                INSERT INTO standings
+                    (season_id, class, rider_id, points, position, wins, podiums,
+                     updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                """,
+                (sid, sclass, rider, points, position_of[(sid, sclass, rider)],
+                 wins, podiums),
             )
-            UPDATE standings st
-            SET position = ranked.rn
-            FROM ranked
-            WHERE st.id = ranked.id
-            """,
-            params,
-        )
 
-    return written
+    return len(agg)

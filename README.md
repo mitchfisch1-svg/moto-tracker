@@ -117,9 +117,6 @@ duplicating them.
 
 ### Known limitations (results)
 
-- **250SX East/West are combined.** Supercross runs two regional 250
-  championships; we currently total them into one `SX / 250` standings. Splitting
-  them needs each round's region (it's on the schedule page) — a future refinement.
 - **SX Round 16 (Denver)** has no results link in the schedule source, so it
   isn't ingested. Other rounds backfill fully.
 - **`rider_match_review`** holds name pairs the matcher wouldn't merge on its own
@@ -131,6 +128,5 @@ All six build steps from `claude-code-kickoff.md` (in your Downloads) are comple
 ### Later phases (not built yet)
 
 - **Always-on hosting** for the scheduler (Railway / Render / Fly.io).
-- **Split 250SX East/West** into their two real championships.
 - **X / social auto-posting** of news and results.
 - **A frontend** (e.g. Next.js reading this same database) for an ESPN-style UI.

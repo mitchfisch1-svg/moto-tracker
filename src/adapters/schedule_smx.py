@@ -56,6 +56,25 @@ TZ_BY_ABBR = {
 _TIME_RE = re.compile(r"(\d{1,2}):(\d{2})\s*(am|pm)\s*([a-z]{2})", re.I)
 _DATE_RE = re.compile(r"(\d{1,2})\s*([a-z]{3})", re.I)
 _INT_RE = re.compile(r"\d+")
+_REGION_E_RE = re.compile(r"250\s*(?:SX)?\s*E\b", re.I)
+_REGION_W_RE = re.compile(r"250\s*(?:SX)?\s*W\b", re.I)
+
+
+def parse_250_region(race_type):
+    """From a card's race-type text, find the 250 region: 'E', 'W', 'EW', or None.
+
+    e.g. '450SX / 250SX W' -> 'W'; '450SX / 250 E/W SHOWDOWN' -> 'EW'.
+    """
+    if not race_type:
+        return None
+    up = race_type.upper()
+    if "E/W" in up or "SHOWDOWN" in up:
+        return "EW"
+    if _REGION_E_RE.search(up):
+        return "E"
+    if _REGION_W_RE.search(up):
+        return "W"
+    return None
 
 
 class ScheduleSMXAdapter(BaseAdapter):
@@ -101,6 +120,7 @@ class ScheduleSMXAdapter(BaseAdapter):
             location = self._text(card, "p", "location")
             date_text = self._text(card, None, "date")
             time_text = self._text(card, None, "time")
+            race_type = self._text(card, None, "race-type")
 
             city, state = self._split_location(location)
             event_date = self._parse_date(date_text)
@@ -117,6 +137,7 @@ class ScheduleSMXAdapter(BaseAdapter):
                     "series_abbrev": SERIES_BY_DISCIPLINE[discipline],
                     "round_int": round_int,
                     "round_label": round_label,
+                    "region_250": parse_250_region(race_type),
                     "venue": venue,
                     "city": city,
                     "state": state,
@@ -146,6 +167,7 @@ class ScheduleSMXAdapter(BaseAdapter):
                     "season_id": season_id,
                     "round_number": r["round_number"],
                     "round_label": r["round_label"],
+                    "region_250": r["region_250"],
                     "venue": r["venue"],
                     "city": r["city"],
                     "state": r["state"],
@@ -163,8 +185,9 @@ class ScheduleSMXAdapter(BaseAdapter):
             db_rows,
             conflict_cols=["season_id", "round_number"],
             update_cols=[
-                "round_label", "venue", "city", "state", "event_date",
-                "start_time_utc", "status", "source_url", "updated_at",
+                "round_label", "region_250", "venue", "city", "state",
+                "event_date", "start_time_utc", "status", "source_url",
+                "updated_at",
             ],
         )
 
