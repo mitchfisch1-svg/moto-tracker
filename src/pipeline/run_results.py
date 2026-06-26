@@ -25,8 +25,13 @@ from src.standings import recompute_standings  # noqa: E402
 _SMX_ID_RE = re.compile(r"view_event&id=(\d+)")
 
 
-def select_events(conn, smx_id=None, limit=None):
-    """Return event dicts to ingest (only those with a results event id)."""
+def select_events(conn, smx_id=None, limit=None, target_status="final"):
+    """Return event dicts to ingest (only those with a results event id).
+
+    With smx_id set, returns just that event regardless of status. Otherwise
+    returns events whose status == target_status ('final' to backfill completed
+    rounds, 'live' for the scheduler's during-event polling).
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -49,8 +54,8 @@ def select_events(conn, smx_id=None, limit=None):
         if smx_id is not None:
             if this_smx != str(smx_id):
                 continue
-        elif status != "final":
-            continue  # backfill mode: completed rounds only
+        elif status != target_status:
+            continue
         events.append(
             {
                 "event_id": eid,

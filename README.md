@@ -65,6 +65,27 @@ python -m src.pipeline.run_results    # parse race results + recompute standings
 `run_results` ingests all completed rounds by default; pass `--smx-id <id>` for a
 single event or `--limit <n>` to cap how many.
 
+## Run the scheduler (automation)
+
+Instead of running each pipeline by hand, the scheduler runs them on a timer:
+
+```powershell
+python -m src.scheduler          # runs forever — Ctrl+C to stop
+python -m src.scheduler --once   # run each job a single time (handy for testing)
+```
+
+Cadence:
+
+| Job | Frequency | What it does |
+|---|---|---|
+| schedule | weekly (Mon 06:00 UTC) | refresh the calendar |
+| news | every 20 minutes | pull the latest headlines |
+| results | every 3 minutes | ingest results + standings — **only while an event is live** |
+
+"Live" is derived from each event's `start_time_utc` plus a 6-hour window, so the
+results job does nothing the rest of the week. Keep the process running on your PC,
+or deploy it to an always-on host (Railway / Render / Fly.io) for 24/7 updates.
+
 Pipelines are idempotent — re-running updates existing rows instead of
 duplicating them.
 
@@ -87,7 +108,9 @@ duplicating them.
       `src/standings.py` (points + standings), `src/pipeline/run_results.py`.
       Handles Supercross Triple Crown rounds (combined overall) and flags
       ambiguous rider names to `rider_match_review`.
-- [ ] Step 6 — Scheduler
+- [x] **Step 6 — Scheduler:** `src/scheduler.py` (APScheduler). Schedule weekly,
+      news every 20 min, results every 3 min for live events only (status derived
+      from `start_time_utc` + a 6-hour window).
 
 > **Note on Vital MX:** its RSS feed (`vitalmx.com/rss.xml`) is valid but
 > currently publishes no items, so it contributes 0 articles for now.
@@ -103,4 +126,11 @@ duplicating them.
   (e.g. the Coenen brothers). Review and mark `resolved = TRUE` to dismiss, or
   merge by adding a row to `rider_aliases`.
 
-See `claude-code-kickoff.md` (in your Downloads) for the full build plan.
+All six build steps from `claude-code-kickoff.md` (in your Downloads) are complete.
+
+### Later phases (not built yet)
+
+- **Always-on hosting** for the scheduler (Railway / Render / Fly.io).
+- **Split 250SX East/West** into their two real championships.
+- **X / social auto-posting** of news and results.
+- **A frontend** (e.g. Next.js reading this same database) for an ESPN-style UI.
