@@ -74,7 +74,10 @@ duplicating them.
       `src/adapters/news_rss.py` + `src/pipeline/run_news.py`. Pulls headlines
       from Racer X, Vital MX, PulpMX, MX Vice, and Swapmoto Live into
       `news_articles`.
-- [ ] Step 4 — Investigate the live-timing API
+- [x] **Step 4 — Live-timing API investigation:** see
+      [`docs/live-timing-api.md`](docs/live-timing-api.md). Found a public Live
+      Race Media JSON API (real-time) **and** a durable HTML/PDF results backend;
+      documented endpoints, field shapes, and the event-id linkage.
 - [ ] Step 5 — Results parsing + rider resolution
 - [ ] Step 6 — Scheduler
 
