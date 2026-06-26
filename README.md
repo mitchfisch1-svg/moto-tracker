@@ -145,10 +145,17 @@ Then open **http://127.0.0.1:8000/docs** for interactive, auto-generated docs.
   (e.g. the Coenen brothers). Review and mark `resolved = TRUE` to dismiss, or
   merge by adding a row to `rider_aliases`.
 
-All six build steps from `claude-code-kickoff.md` (in your Downloads) are complete.
+All six build steps from `claude-code-kickoff.md` (in your Downloads) are complete,
+plus a read-only REST API.
+
+## Deploy it online (free)
+
+To run this on the internet — the data pipelines on free GitHub Actions and the
+API on a free Render web service — follow **[`DEPLOY.md`](DEPLOY.md)**. Config is
+already in the repo (`render.yaml`, `.github/workflows/`, `requirements-api.txt`).
 
 ### Later phases (not built yet)
 
-- **Always-on hosting** for the scheduler (Railway / Render / Fly.io).
+- **iPhone app** (Expo / React Native) reading this API → the Apple App Store.
 - **X / social auto-posting** of news and results.
-- **A frontend** (e.g. Next.js reading this same database) for an ESPN-style UI.
+- **A web frontend** for an ESPN-style UI.

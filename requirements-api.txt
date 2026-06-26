@@ -1,0 +1,7 @@
+# Slim dependency set for the API web service only (no scrapers).
+# The scheduler / pipelines use the full requirements.txt instead.
+fastapi
+uvicorn[standard]
+psycopg[binary]
+psycopg-pool
+python-dotenv

@@ -1,0 +1,22 @@
+name: news
+
+# Pull the latest headlines on a schedule (cron is UTC). Also runnable by hand
+# from the Actions tab via "Run workflow".
+on:
+  schedule:
+    - cron: "*/20 * * * *"   # every 20 minutes
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m src.scheduler --job news
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

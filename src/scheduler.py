@@ -116,7 +116,17 @@ def main():
     ap.add_argument(
         "--once", action="store_true", help="run each job once and exit"
     )
+    ap.add_argument(
+        "--job", choices=["schedule", "news", "results"],
+        help="run a single job once and exit (used by scheduled CI jobs)",
+    )
     args = ap.parse_args()
+
+    if args.job:
+        {"schedule": job_schedule, "news": job_news, "results": job_results}[
+            args.job
+        ]()
+        return
 
     if args.once:
         run_once()
