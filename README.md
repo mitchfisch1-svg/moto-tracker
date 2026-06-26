@@ -51,10 +51,23 @@ python scripts/seed_series.py # inserts SX / MX / SMX + this year's seasons
 `init_db.py` prints the tables it created and `seed_series.py` prints the seeded
 series, so you can confirm the database is live.
 
+## Run the pipelines
+
+With `.env` filled in and the venv active:
+
+```powershell
+python -m src.pipeline.run_schedule   # scrape the SX/MX/SMX schedule into `events`
+```
+
+Pipelines are idempotent — re-running updates existing rows instead of
+duplicating them.
+
 ## Status
 
 - [x] **Step 1 — Foundation:** schema, config, DB helpers, base adapter, seed scripts.
-- [ ] Step 2 — Schedule scraper
+- [x] **Step 2 — Schedule scraper:** `src/adapters/schedule_smx.py` +
+      `src/pipeline/run_schedule.py`. Pulls all SX/MX/SMX rounds from
+      supermotocross.com into `events`.
 - [ ] Step 3 — News via RSS
 - [ ] Step 4 — Investigate the live-timing API
 - [ ] Step 5 — Results parsing + rider resolution

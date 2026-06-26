@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS events (
     id             SERIAL PRIMARY KEY,
     season_id      INTEGER NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
     round_number   INTEGER NOT NULL,
+    round_label    TEXT,                        -- raw label, e.g. 'Round 28/MX Championship Round'
     venue          TEXT,
     city           TEXT,
     state          TEXT,
@@ -160,3 +161,10 @@ CREATE TABLE IF NOT EXISTS standings (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (season_id, class, rider_id)
 );
+
+-- ---------------------------------------------------------------------------
+-- Migrations — additive, idempotent. Bring already-created tables up to date.
+-- (CREATE TABLE IF NOT EXISTS above won't add columns to an existing table.)
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE events ADD COLUMN IF NOT EXISTS round_label TEXT;
