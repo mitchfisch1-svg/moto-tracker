@@ -89,6 +89,28 @@ or deploy it to an always-on host (Railway / Render / Fly.io) for 24/7 updates.
 Pipelines are idempotent — re-running updates existing rows instead of
 duplicating them.
 
+## REST API
+
+A read-only API (FastAPI) serves the data as JSON — this is what a web or iPhone
+app calls. Run it locally (venv active, from the project root):
+
+```powershell
+uvicorn src.api.main:app --reload
+```
+
+Then open **http://127.0.0.1:8000/docs** for interactive, auto-generated docs.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /series` | the three series + season year |
+| `GET /schedule?series=MX&year=2026&status=final` | events (each with `event_id`) |
+| `GET /schedule/next?series=MX` | the next upcoming round(s) |
+| `GET /standings?series=SX&class=450` | championship standings (250 = `250 East`/`250 West`) |
+| `GET /news?limit=20` | latest headlines |
+| `GET /riders?search=deegan` · `GET /riders/{id}` | rider lookup + detail |
+| `GET /events/{id}` | one event with its sessions and results |
+| `GET /health` | liveness + DB check |
+
 ## Status
 
 - [x] **Step 1 — Foundation:** schema, config, DB helpers, base adapter, seed scripts.

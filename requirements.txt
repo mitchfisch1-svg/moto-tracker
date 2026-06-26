@@ -6,3 +6,6 @@ feedparser
 pdfplumber
 rapidfuzz
 APScheduler
+fastapi
+uvicorn[standard]
+psycopg-pool
