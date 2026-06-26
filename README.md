@@ -56,7 +56,9 @@ series, so you can confirm the database is live.
 With `.env` filled in and the venv active:
 
 ```powershell
+python scripts/seed_sources.py        # one-time: register the RSS news sources
 python -m src.pipeline.run_schedule   # scrape the SX/MX/SMX schedule into `events`
+python -m src.pipeline.run_news       # pull headlines into `news_articles`
 ```
 
 Pipelines are idempotent — re-running updates existing rows instead of
@@ -68,9 +70,15 @@ duplicating them.
 - [x] **Step 2 — Schedule scraper:** `src/adapters/schedule_smx.py` +
       `src/pipeline/run_schedule.py`. Pulls all SX/MX/SMX rounds from
       supermotocross.com into `events`.
-- [ ] Step 3 — News via RSS
+- [x] **Step 3 — News via RSS:** `scripts/seed_sources.py` +
+      `src/adapters/news_rss.py` + `src/pipeline/run_news.py`. Pulls headlines
+      from Racer X, Vital MX, PulpMX, MX Vice, and Swapmoto Live into
+      `news_articles`.
 - [ ] Step 4 — Investigate the live-timing API
 - [ ] Step 5 — Results parsing + rider resolution
 - [ ] Step 6 — Scheduler
+
+> **Note on Vital MX:** its RSS feed (`vitalmx.com/rss.xml`) is valid but
+> currently publishes no items, so it contributes 0 articles for now.
 
 See `claude-code-kickoff.md` (in your Downloads) for the full build plan.
