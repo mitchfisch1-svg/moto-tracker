@@ -174,5 +174,9 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS round_label TEXT;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS region_250 TEXT;
 -- JSON array of US broadcast listings: [{"label","time_et","providers":[...]}]
 ALTER TABLE events ADD COLUMN IF NOT EXISTS broadcast TEXT;
+-- Live Race Media event id (for the live-timing JSON), derived + cached lazily.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS lrm_id TEXT;
 -- Bike make (KTM, Honda, Yamaha, ...) derived from the rider's team on results.
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS manufacturer TEXT;
+ALTER TABLE riders ADD COLUMN IF NOT EXISTS hometown TEXT;
+ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_url TEXT;

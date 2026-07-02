@@ -5,3 +5,5 @@ uvicorn[standard]
 psycopg[binary]
 psycopg-pool
 python-dotenv
+requests
+

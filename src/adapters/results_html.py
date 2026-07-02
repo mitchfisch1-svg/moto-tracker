@@ -191,7 +191,9 @@ class ResultsHTMLAdapter:
                     r["name"], r["bike_number"], context=f"{event['label']} {label}"
                 )
                 if rider_id is not None and r["team"]:
-                    profiles[rider_id] = (r["team"], manufacturer_from_team(r["team"]))
+                    profiles[rider_id] = (
+                        r["team"], manufacturer_from_team(r["team"]), r["hometown"]
+                    )
                 result_rows.append(
                     {
                         "session_id": session_id,
@@ -230,8 +232,10 @@ class ResultsHTMLAdapter:
             return
         with conn.cursor() as cur:
             cur.executemany(
-                "UPDATE riders SET team = %s, manufacturer = %s WHERE id = %s",
-                [(team, make, rid) for rid, (team, make) in profiles.items()],
+                "UPDATE riders SET team = %s, manufacturer = %s, hometown = %s "
+                "WHERE id = %s",
+                [(team, make, home, rid)
+                 for rid, (team, make, home) in profiles.items()],
             )
 
     def _ingest_triple_crown(self, conn, event, cls, race_list, resolver, profiles):
@@ -252,7 +256,9 @@ class ResultsHTMLAdapter:
                     context=f"{event['label']} {label}",
                 )
                 if rider_id is not None and r["team"]:
-                    profiles[rider_id] = (r["team"], manufacturer_from_team(r["team"]))
+                    profiles[rider_id] = (
+                        r["team"], manufacturer_from_team(r["team"]), r["hometown"]
+                    )
                 if rider_id is not None and r["position"]:
                     pos_by_rider[rider_id] = r["position"]
             per_race.append(pos_by_rider)

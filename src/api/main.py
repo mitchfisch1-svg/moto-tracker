@@ -10,9 +10,11 @@ then open http://127.0.0.1:8000/docs
 
 import datetime
 import json
+import re
 from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo
 
+import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
@@ -98,7 +100,7 @@ def root():
         "name": "Moto Tracker API",
         "docs": "/docs",
         "endpoints": [
-            "/series", "/schedule", "/schedule/next", "/standings",
+            "/series", "/schedule", "/schedule/next", "/standings", "/live",
             "/news", "/riders", "/riders/{id}", "/events/{id}", "/health",
         ],
     }
@@ -241,8 +243,8 @@ def riders(search: str | None = None, limit: int = Query(25, le=100)):
 @app.get("/riders/{rider_id}")
 def rider(rider_id: int):
     info = query(
-        "SELECT id, full_name, number, team, manufacturer, country "
-        "FROM riders WHERE id = %s",
+        "SELECT id, full_name, number, team, manufacturer, hometown, "
+        "headshot_url, country FROM riders WHERE id = %s",
         [rider_id],
     )
     if not info:
@@ -250,12 +252,28 @@ def rider(rider_id: int):
     standings_rows = query(
         """
         SELECT s.abbrev AS series, st.class, st.position, st.points,
-               st.wins, st.podiums
+               st.wins, st.podiums, lead.max_points - st.points AS gap
         FROM standings st
         JOIN seasons se ON se.id = st.season_id
         JOIN series  s  ON s.id  = se.series_id
+        JOIN (
+            SELECT season_id, class, MAX(points) AS max_points
+            FROM standings GROUP BY season_id, class
+        ) lead ON lead.season_id = st.season_id AND lead.class = st.class
         WHERE st.rider_id = %s
         ORDER BY s.id, st.class
+        """,
+        [rider_id],
+    )
+    stats = query(
+        """
+        SELECT count(*)                                        AS races,
+               MIN(position)                                   AS best_finish,
+               ROUND(AVG(position)::numeric, 1)                AS avg_finish,
+               COUNT(*) FILTER (WHERE position = 1)            AS wins,
+               COUNT(*) FILTER (WHERE position <= 3)           AS podiums,
+               COUNT(*) FILTER (WHERE status IN ('dnf','dns','dsq')) AS dnfs
+        FROM results WHERE rider_id = %s
         """,
         [rider_id],
     )
@@ -274,7 +292,135 @@ def rider(rider_id: int):
         """,
         [rider_id],
     )
-    return {"rider": info[0], "standings": standings_rows, "recent_results": recent}
+    return {
+        "rider": info[0],
+        "season_stats": stats[0] if stats else None,
+        "standings": standings_rows,
+        "recent_results": recent,
+    }
+
+
+# --- live timing -------------------------------------------------------------
+# See docs/live-timing-api.md: live.supermotocross.com reads public JSON from
+# Live Race Media's S3 bucket, keyed by an event id we derive from the event's
+# results page and cache in events.lrm_id.
+_LRM_S3 = "https://s3.amazonaws.com/assets.liveracemedia.com/event_files"
+_LRM_HEADERS = {"User-Agent": "MotoTracker/0.1 (personal project)"}
+_SMX_ID_RE = re.compile(r"view_event&(?:amp;)?id=(\d+)")
+_LRM_ID_RE = re.compile(r"event_files/(\d+)/")
+
+
+def _derive_lrm_id(event_id: int, source_url: str | None) -> str | None:
+    """Scrape the event's results page for its Live Race Media id and cache it."""
+    m = _SMX_ID_RE.search(source_url or "")
+    if not m:
+        return None
+    try:
+        resp = requests.get(
+            f"https://results.supermotocross.com/results/?p=view_event&id={m.group(1)}",
+            headers=_LRM_HEADERS, timeout=15,
+        )
+        found = _LRM_ID_RE.search(resp.text)
+    except requests.RequestException:
+        return None
+    if not found:
+        return None
+    lrm_id = found.group(1)
+    with _pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE events SET lrm_id = %s WHERE id = %s",
+                        (lrm_id, event_id))
+    return lrm_id
+
+
+def _lrm_json(lrm_id: str, name: str):
+    try:
+        resp = requests.get(f"{_LRM_S3}/{lrm_id}/{name}.json",
+                            headers=_LRM_HEADERS, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def _rider_status(r: dict) -> str:
+    if r.get("IsDisqualified"):
+        return "dsq"
+    if r.get("IsDidNotStart"):
+        return "dns"
+    if r.get("IsDidNotFinish") or r.get("IsBroken"):
+        return "dnf"
+    return "running"
+
+
+@app.get("/live")
+def live():
+    """Live-timing snapshot for the event happening now (if any).
+
+    Returns {live: false, next_event} outside the race window; during an event
+    (30 min before start to ~6 hours after) returns the current on-track
+    running order from Live Race Media.
+    """
+    rows = query(
+        """
+        SELECT e.id AS event_id, s.abbrev AS series, e.round_number,
+               e.round_label, e.venue, e.city, e.state, e.event_date,
+               e.start_time_utc, e.status, e.broadcast, e.source_url, e.lrm_id
+        FROM events e
+        JOIN seasons se ON se.id = e.season_id
+        JOIN series  s  ON s.id  = se.series_id
+        WHERE e.start_time_utc IS NOT NULL
+          AND now() >= e.start_time_utc - interval '30 minutes'
+          AND now() <= e.start_time_utc + interval '6 hours'
+        ORDER BY e.start_time_utc
+        LIMIT 1
+        """
+    )
+    if not rows:
+        nxt = next_events(limit=1)
+        return {"live": False, "event": None,
+                "next_event": nxt[0] if nxt else None}
+
+    ev = dict(rows[0])
+    lrm_id = ev.pop("lrm_id", None) or _derive_lrm_id(ev["event_id"], ev["source_url"])
+    ev.pop("source_url", None)
+    ev = _decorate_event(ev)
+    if not lrm_id:
+        return {"live": True, "event": ev, "timing": None}
+
+    race = _lrm_json(lrm_id, "race")
+    riders_raw = _lrm_json(lrm_id, "riders") or []
+    clock = _lrm_json(lrm_id, "clock")
+
+    riders = [
+        {
+            "position": r.get("Position"),
+            "name": f"{r.get('FirstName', '')} {r.get('LastName', '')}".strip(),
+            "number": r.get("BikeNumber"),
+            "laps": r.get("CompletedLaps"),
+            "last_lap": r.get("LapTime"),
+            "best_lap": r.get("FastestLap"),
+            "gap": r.get("DifferenceBehindLeaderDisplay") or "",
+            "manufacturer": r.get("Manufacturer"),
+            "team": r.get("TeamName"),
+            "status": _rider_status(r),
+        }
+        for r in sorted(riders_raw, key=lambda x: x.get("Position") or 999)
+    ]
+
+    timing = {
+        "race_name": (race or {}).get("RaceNameOverride")
+                     or (race or {}).get("ClassName"),
+        "event_name": (race or {}).get("EventName"),
+        "race_status": (race or {}).get("RaceStatus"),
+        "clock": {
+            "elapsed": (clock or {}).get("Elapsed"),
+            "remaining": (clock or {}).get("Remaining"),
+            "flag": (clock or {}).get("FlagType"),
+        },
+        "riders": riders,
+    }
+    return {"live": True, "event": ev, "timing": timing}
 
 
 # --- events ----------------------------------------------------------------
