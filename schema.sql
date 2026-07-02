@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS events (
     start_time_utc TIMESTAMPTZ,
     -- Lifecycle: scheduled -> live -> final (the scheduler flips this).
     status         TEXT NOT NULL DEFAULT 'scheduled',
+    broadcast      TEXT,                        -- JSON array of US broadcast listings
     source_url     TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -94,6 +95,7 @@ CREATE TABLE IF NOT EXISTS riders (
     number      TEXT,                           -- race number, kept as text (e.g. '1', '94')
     country     TEXT,
     team        TEXT,
+    manufacturer TEXT,                          -- bike make: KTM, Honda, Yamaha, ...
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -170,3 +172,7 @@ CREATE TABLE IF NOT EXISTS standings (
 
 ALTER TABLE events ADD COLUMN IF NOT EXISTS round_label TEXT;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS region_250 TEXT;
+-- JSON array of US broadcast listings: [{"label","time_et","providers":[...]}]
+ALTER TABLE events ADD COLUMN IF NOT EXISTS broadcast TEXT;
+-- Bike make (KTM, Honda, Yamaha, ...) derived from the rider's team on results.
+ALTER TABLE riders ADD COLUMN IF NOT EXISTS manufacturer TEXT;

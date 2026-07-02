@@ -9,7 +9,9 @@ then open http://127.0.0.1:8000/docs
 """
 
 import datetime
+import json
 from contextlib import asynccontextmanager
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,6 +68,29 @@ def _current_year() -> int:
     return datetime.date.today().year
 
 
+_EASTERN = ZoneInfo("America/New_York")
+
+
+def _decorate_event(row: dict) -> dict:
+    """Add start_time_et (display string) and parse the broadcast JSON."""
+    utc = row.get("start_time_utc")
+    if utc:
+        et = utc.astimezone(_EASTERN)
+        hour = et.hour % 12 or 12
+        ampm = "AM" if et.hour < 12 else "PM"
+        row["start_time_et"] = (
+            f"{et.strftime('%a, %b')} {et.day} · {hour}:{et.minute:02d} {ampm} ET"
+        )
+    else:
+        row["start_time_et"] = None
+    if "broadcast" in row:
+        try:
+            row["broadcast"] = json.loads(row["broadcast"]) if row["broadcast"] else None
+        except (TypeError, ValueError):
+            row["broadcast"] = None
+    return row
+
+
 # --- meta ------------------------------------------------------------------
 @app.get("/")
 def root():
@@ -111,7 +136,7 @@ def schedule(
     sql = """
         SELECT e.id AS event_id, s.abbrev AS series, e.round_number,
                e.round_label, e.region_250, e.venue, e.city, e.state,
-               e.event_date, e.start_time_utc, e.status
+               e.event_date, e.start_time_utc, e.status, e.broadcast
         FROM events e
         JOIN seasons se ON se.id = e.season_id
         JOIN series  s  ON s.id  = se.series_id
@@ -126,7 +151,7 @@ def schedule(
         params.append(status)
     sql += " ORDER BY s.id, e.round_number LIMIT %s"
     params.append(limit)
-    return query(sql, params)
+    return [_decorate_event(r) for r in query(sql, params)]
 
 
 @app.get("/schedule/next")
@@ -134,7 +159,7 @@ def next_events(series: str | None = None, limit: int = Query(3, le=20)):
     sql = """
         SELECT e.id AS event_id, s.abbrev AS series, e.round_number,
                e.round_label, e.venue, e.city, e.state, e.event_date,
-               e.start_time_utc, e.status
+               e.start_time_utc, e.status, e.broadcast
         FROM events e
         JOIN seasons se ON se.id = e.season_id
         JOIN series  s  ON s.id  = se.series_id
@@ -146,7 +171,7 @@ def next_events(series: str | None = None, limit: int = Query(3, le=20)):
         params.append(series.upper())
     sql += " ORDER BY e.event_date LIMIT %s"
     params.append(limit)
-    return query(sql, params)
+    return [_decorate_event(r) for r in query(sql, params)]
 
 
 # --- standings -------------------------------------------------------------
@@ -159,7 +184,7 @@ def standings(
     year = year or _current_year()
     sql = """
         SELECT st.class, st.position, r.id AS rider_id, r.full_name, r.number,
-               st.points, st.wins, st.podiums
+               r.team, r.manufacturer, st.points, st.wins, st.podiums
         FROM standings st
         JOIN seasons se ON se.id = st.season_id
         JOIN series  s  ON s.id  = se.series_id
@@ -171,7 +196,13 @@ def standings(
         sql += " AND st.class = %s"
         params.append(klass)
     sql += " ORDER BY st.class, st.position"
-    return query(sql, params)
+    rows = query(sql, params)
+    # Points behind the class leader (0 for the leader).
+    leader: dict[str, int] = {}
+    for row in rows:
+        leader.setdefault(row["class"], row["points"])
+        row["gap"] = leader[row["class"]] - row["points"]
+    return rows
 
 
 # --- news ------------------------------------------------------------------
@@ -196,7 +227,8 @@ def news(limit: int = Query(20, le=100), source: str | None = None):
 # --- riders ----------------------------------------------------------------
 @app.get("/riders")
 def riders(search: str | None = None, limit: int = Query(25, le=100)):
-    sql = "SELECT id, full_name, number, team, country FROM riders WHERE TRUE"
+    sql = ("SELECT id, full_name, number, team, manufacturer, country "
+           "FROM riders WHERE TRUE")
     params = []
     if search:
         sql += " AND full_name ILIKE %s"
@@ -209,7 +241,8 @@ def riders(search: str | None = None, limit: int = Query(25, le=100)):
 @app.get("/riders/{rider_id}")
 def rider(rider_id: int):
     info = query(
-        "SELECT id, full_name, number, team, country FROM riders WHERE id = %s",
+        "SELECT id, full_name, number, team, manufacturer, country "
+        "FROM riders WHERE id = %s",
         [rider_id],
     )
     if not info:

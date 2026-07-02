@@ -1,5 +1,8 @@
 """Schedule adapter for supermotocross.com.
 
+Also captures each event's US broadcast listings (label, ET time, providers)
+from the card's `.broadcast-options` block into events.broadcast as JSON.
+
 Pulls the full SX / MX / SMX calendar from the official schedule page and
 upserts each event into the `events` table, keyed on (season_id, round_number).
 
@@ -13,6 +16,7 @@ optional results link (a[href*=view_event]).
 """
 
 import datetime
+import json
 import re
 from zoneinfo import ZoneInfo
 
@@ -58,6 +62,55 @@ _DATE_RE = re.compile(r"(\d{1,2})\s*([a-z]{3})", re.I)
 _INT_RE = re.compile(r"\d+")
 _REGION_E_RE = re.compile(r"250\s*(?:SX)?\s*E\b", re.I)
 _REGION_W_RE = re.compile(r"250\s*(?:SX)?\s*W\b", re.I)
+
+
+# Provider logo filename fragment -> display name.
+PROVIDERS_BY_LOGO = {
+    "peacock": "Peacock",
+    "logo-nbc": "NBC",
+    "cnbc": "CNBC",
+    "logo-usa": "USA Network",
+    "sirius": "SiriusXM",
+    "logo-smx-vp": "SMX Video Pass",
+}
+
+_ET_TIME_RE = re.compile(r"(\d{1,2}(?::\d{2})?\s*[ap]\.?m\.?)\s*ET", re.I)
+
+
+def parse_broadcast(card):
+    """Extract US broadcast listings from an event card, as a JSON string.
+
+    Returns e.g. '[{"label": "Gate Drop", "time_et": "1 p.m.",
+    "providers": ["Peacock", "SiriusXM"]}]' or None when the card has no
+    broadcast block (e.g. SMX playoffs before info is announced).
+    """
+    block = card.find(class_="broadcast-options")
+    if not block:
+        return None
+
+    listings = []
+    for opt in block.find_all(class_="broadcast-option"):
+        classes = opt.get("class", [])
+        if "us-only" not in classes:
+            continue  # keep the US listings (they carry the ET times)
+        text = opt.get_text(" ", strip=True)
+        m = _ET_TIME_RE.search(text)
+        label = text[: m.start()].strip(" |") if m else text.strip(" |")
+        label = re.sub(r"^English only\s*\|?\s*", "", label, flags=re.I).strip()
+        providers = []
+        for img in opt.find_all("img"):
+            src = (img.get("src") or "").lower()
+            for frag, name in PROVIDERS_BY_LOGO.items():
+                if frag in src and name not in providers:
+                    providers.append(name)
+        listings.append(
+            {
+                "label": label or None,
+                "time_et": m.group(1).replace(".", "").lower() if m else None,
+                "providers": providers,
+            }
+        )
+    return json.dumps(listings) if listings else None
 
 
 def parse_250_region(race_type):
@@ -138,6 +191,7 @@ class ScheduleSMXAdapter(BaseAdapter):
                     "round_int": round_int,
                     "round_label": round_label,
                     "region_250": parse_250_region(race_type),
+                    "broadcast": parse_broadcast(card),
                     "venue": venue,
                     "city": city,
                     "state": state,
@@ -168,6 +222,7 @@ class ScheduleSMXAdapter(BaseAdapter):
                     "round_number": r["round_number"],
                     "round_label": r["round_label"],
                     "region_250": r["region_250"],
+                    "broadcast": r["broadcast"],
                     "venue": r["venue"],
                     "city": r["city"],
                     "state": r["state"],
@@ -185,9 +240,9 @@ class ScheduleSMXAdapter(BaseAdapter):
             db_rows,
             conflict_cols=["season_id", "round_number"],
             update_cols=[
-                "round_label", "region_250", "venue", "city", "state",
-                "event_date", "start_time_utc", "status", "source_url",
-                "updated_at",
+                "round_label", "region_250", "broadcast", "venue", "city",
+                "state", "event_date", "start_time_utc", "status",
+                "source_url", "updated_at",
             ],
         )
 

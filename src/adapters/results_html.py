@@ -35,6 +35,27 @@ _POS_RE = re.compile(r"^(\d+|DNF|DNS|DSQ|DNQ)$", re.I)
 _LAPS_RE = re.compile(r"^(\d+)\s*/")
 _TC_RACE_RE = re.compile(r"RACE\s*#?\s*\d")
 
+# Bike makes we recognize inside team names. When several appear ("Troy Lee
+# Designs Red Bull GasGas"), the make is conventionally last, so we keep the
+# one that appears furthest into the string.
+MANUFACTURERS = [
+    "KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS",
+    "Husqvarna", "Ducati", "Triumph", "Beta", "Stark",
+]
+
+
+def manufacturer_from_team(team):
+    """Best-effort bike make from a team name, or None."""
+    if not team:
+        return None
+    up = team.upper()
+    best, best_pos = None, -1
+    for make in MANUFACTURERS:
+        pos = up.rfind(make.upper())
+        if pos > best_pos:
+            best, best_pos = make, pos
+    return "GasGas" if best == "GASGAS" else best
+
 
 def classify(label: str):
     """Map a race label to (class, type). Returns (None, None) if unrecognized."""
@@ -156,6 +177,7 @@ class ResultsHTMLAdapter:
         normal = [r for r in races if r[3] in ("main", "moto")]
         tc_races = [r for r in races if r[3] == "tc_race"]
         total_results = 0
+        profiles = {}  # rider_id -> (team, manufacturer), latest wins
 
         for i, (race_id, label, cls, typ) in enumerate(normal):
             parsed = self.parse_race_results(race_id)
@@ -168,6 +190,8 @@ class ResultsHTMLAdapter:
                 rider_id, _action = resolver.resolve(
                     r["name"], r["bike_number"], context=f"{event['label']} {label}"
                 )
+                if rider_id is not None and r["team"]:
+                    profiles[rider_id] = (r["team"], manufacturer_from_team(r["team"]))
                 result_rows.append(
                     {
                         "session_id": session_id,
@@ -193,12 +217,24 @@ class ResultsHTMLAdapter:
             by_class.setdefault(cls, []).append((race_id, label))
         for cls, race_list in by_class.items():
             total_results += self._ingest_triple_crown(
-                conn, event, cls, race_list, resolver
+                conn, event, cls, race_list, resolver, profiles
             )
 
+        self._update_rider_profiles(conn, profiles)
         return total_results
 
-    def _ingest_triple_crown(self, conn, event, cls, race_list, resolver):
+    @staticmethod
+    def _update_rider_profiles(conn, profiles):
+        """Refresh riders' team + manufacturer from the latest parsed results."""
+        if not profiles:
+            return
+        with conn.cursor() as cur:
+            cur.executemany(
+                "UPDATE riders SET team = %s, manufacturer = %s WHERE id = %s",
+                [(team, make, rid) for rid, (team, make) in profiles.items()],
+            )
+
+    def _ingest_triple_crown(self, conn, event, cls, race_list, resolver, profiles):
         """Combine the 3 TC races for a class into one overall main result.
 
         AMA scoring: rank riders by total of finishing positions across the
@@ -215,6 +251,8 @@ class ResultsHTMLAdapter:
                     r["name"], r["bike_number"],
                     context=f"{event['label']} {label}",
                 )
+                if rider_id is not None and r["team"]:
+                    profiles[rider_id] = (r["team"], manufacturer_from_team(r["team"]))
                 if rider_id is not None and r["position"]:
                     pos_by_rider[rider_id] = r["position"]
             per_race.append(pos_by_rider)

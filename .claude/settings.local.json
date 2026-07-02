@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\mitch\\\\Downloads\" -Force -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'moto|race|track|spec|kickoff|brief|prd|readme' } | Select-Object FullName, Length, LastWriteTime)"
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\mitch\\\\Downloads\" -Force -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'moto|race|track|spec|kickoff|brief|prd|readme' } | Select-Object FullName, Length, LastWriteTime)",
+      "PowerShell($ErrorActionPreference = \"Continue\")",
+      "WebSearch"
     ]
   }
 }
