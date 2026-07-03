@@ -3,7 +3,10 @@
     "allow": [
       "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\mitch\\\\Downloads\" -Force -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'moto|race|track|spec|kickoff|brief|prd|readme' } | Select-Object FullName, Length, LastWriteTime)",
       "PowerShell($ErrorActionPreference = \"Continue\")",
-      "WebSearch"
+      "WebSearch",
+      "PowerShell(python -m pip install pillow --quiet)",
+      "PowerShell(python \"C:\\\\Users\\\\mitch\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-mitch-OneDrive-Documents-Moto-Tracker-App\\\\720daf0d-a03b-4ca2-b43e-8ecf522fd316\\\\scratchpad\\\\make_icons.py\")",
+      "PowerShell(\\(Invoke-WebRequest -UseBasicParsing http://localhost:5050/static/icon-180.png\\).StatusCode; \\(Invoke-WebRequest -UseBasicParsing http://localhost:5050/static/manifest.json\\).StatusCode)"
     ]
   }
 }

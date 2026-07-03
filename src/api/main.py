@@ -101,7 +101,8 @@ def root():
         "docs": "/docs",
         "endpoints": [
             "/series", "/schedule", "/schedule/next", "/standings", "/live",
-            "/news", "/riders", "/riders/{id}", "/events/{id}", "/health",
+            "/recap", "/news", "/riders", "/riders/{id}", "/events/{id}",
+            "/health",
         ],
     }
 
@@ -441,6 +442,100 @@ def live(demo: bool = False):
         "riders": riders,
     }
     return {"live": True, "demo": is_demo, "event": ev, "timing": timing}
+
+
+# --- recap -------------------------------------------------------------------
+@app.get("/recap")
+def recap():
+    """Summary of the most recent completed event, for the in-app recap story.
+
+    Event "overall" per class = most points scored across that event's
+    sessions (works for SX mains and MX two-moto rounds alike), tie-broken by
+    the better finish in the final session.
+    """
+    ev_rows = query(
+        """
+        SELECT e.id AS event_id, s.abbrev AS series, e.round_number,
+               e.round_label, e.venue, e.city, e.state, e.event_date
+        FROM events e
+        JOIN seasons se ON se.id = e.season_id
+        JOIN series  s  ON s.id  = se.series_id
+        WHERE e.status = 'final'
+          AND EXISTS (SELECT 1 FROM sessions sess
+                      JOIN results r ON r.session_id = sess.id
+                      WHERE sess.event_id = e.id)
+        ORDER BY e.event_date DESC
+        LIMIT 1
+        """
+    )
+    if not ev_rows:
+        return {"event": None, "classes": []}
+    ev = ev_rows[0]
+
+    rows = query(
+        """
+        SELECT sess.class, sess.id AS session_id, sess.label,
+               r.rider_id, ri.full_name, ri.number, ri.manufacturer,
+               ri.headshot_url, r.position, r.points
+        FROM sessions sess
+        JOIN results r ON r.session_id = sess.id
+        JOIN riders  ri ON ri.id = r.rider_id
+        WHERE sess.event_id = %s
+        """,
+        [ev["event_id"]],
+    )
+
+    classes = []
+    by_class: dict[str, list] = {}
+    for r in rows:
+        by_class.setdefault(r["class"], []).append(r)
+
+    for cls, cls_rows in sorted(by_class.items(), reverse=True):  # 450 first
+        last_session = max(r["session_id"] for r in cls_rows)
+        agg: dict[int, dict] = {}
+        for r in cls_rows:
+            a = agg.setdefault(r["rider_id"], {
+                "full_name": r["full_name"], "number": r["number"],
+                "manufacturer": r["manufacturer"],
+                "headshot_url": r["headshot_url"],
+                "event_points": 0, "last_pos": 999, "finishes": [],
+            })
+            a["event_points"] += r["points"] or 0
+            if r["position"]:
+                a["finishes"].append(r["position"])
+                if r["session_id"] == last_session:
+                    a["last_pos"] = r["position"]
+        ranked = sorted(
+            agg.values(),
+            key=lambda a: (-a["event_points"], a["last_pos"]),
+        )
+        podium = []
+        for i, a in enumerate(ranked[:3], start=1):
+            podium.append({
+                "overall": i,
+                "full_name": a["full_name"],
+                "number": a["number"],
+                "manufacturer": a["manufacturer"],
+                "headshot_url": a["headshot_url"],
+                "event_points": a["event_points"],
+                "finishes": "-".join(str(f) for f in a["finishes"]),
+            })
+        # Championship top-3 after this round (SX 250 splits into East/West).
+        st = query(
+            """
+            SELECT st.class, st.position, r.full_name, st.points
+            FROM standings st
+            JOIN seasons se ON se.id = st.season_id
+            JOIN series  s  ON s.id  = se.series_id
+            JOIN riders  r  ON r.id  = st.rider_id
+            WHERE s.abbrev = %s AND st.class LIKE %s AND st.position <= 3
+            ORDER BY st.class, st.position
+            """,
+            [ev["series"], f"{cls}%"],
+        )
+        classes.append({"class": cls, "podium": podium, "standings_top3": st})
+
+    return {"event": ev, "classes": classes}
 
 
 # --- events ----------------------------------------------------------------
