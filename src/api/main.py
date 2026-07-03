@@ -390,7 +390,7 @@ def live(demo: bool = False):
             FROM events e
             JOIN seasons se ON se.id = e.season_id
             JOIN series  s  ON s.id  = se.series_id
-            WHERE e.status = 'final' AND e.source_url LIKE '%view_event%'
+            WHERE e.status = 'final' AND e.source_url LIKE '%%view_event%%'
             ORDER BY e.start_time_utc DESC
             LIMIT 1
             """
