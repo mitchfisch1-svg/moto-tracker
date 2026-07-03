@@ -354,12 +354,15 @@ def _rider_status(r: dict) -> str:
 
 
 @app.get("/live")
-def live():
+def live(demo: bool = False):
     """Live-timing snapshot for the event happening now (if any).
 
     Returns {live: false, next_event} outside the race window; during an event
     (30 min before start to ~6 hours after) returns the current on-track
     running order from Live Race Media.
+
+    With demo=true and no live event, replays the most recent completed event's
+    timing feed so the live screen can be tested/demoed on any day.
     """
     rows = query(
         """
@@ -376,6 +379,23 @@ def live():
         LIMIT 1
         """
     )
+    is_demo = False
+    if not rows and demo:
+        # Replay the latest completed round (its timing JSON stays up on S3).
+        rows = query(
+            """
+            SELECT e.id AS event_id, s.abbrev AS series, e.round_number,
+                   e.round_label, e.venue, e.city, e.state, e.event_date,
+                   e.start_time_utc, e.status, e.broadcast, e.source_url, e.lrm_id
+            FROM events e
+            JOIN seasons se ON se.id = e.season_id
+            JOIN series  s  ON s.id  = se.series_id
+            WHERE e.status = 'final' AND e.source_url LIKE '%view_event%'
+            ORDER BY e.start_time_utc DESC
+            LIMIT 1
+            """
+        )
+        is_demo = bool(rows)
     if not rows:
         nxt = next_events(limit=1)
         return {"live": False, "event": None,
@@ -386,7 +406,7 @@ def live():
     ev.pop("source_url", None)
     ev = _decorate_event(ev)
     if not lrm_id:
-        return {"live": True, "event": ev, "timing": None}
+        return {"live": True, "demo": is_demo, "event": ev, "timing": None}
 
     race = _lrm_json(lrm_id, "race")
     riders_raw = _lrm_json(lrm_id, "riders") or []
@@ -420,7 +440,7 @@ def live():
         },
         "riders": riders,
     }
-    return {"live": True, "event": ev, "timing": timing}
+    return {"live": True, "demo": is_demo, "event": ev, "timing": timing}
 
 
 # --- events ----------------------------------------------------------------
