@@ -359,8 +359,9 @@ def live(demo: bool = False):
     """Live-timing snapshot for the event happening now (if any).
 
     Returns {live: false, next_event} outside the race window; during an event
-    (30 min before start to ~6 hours after) returns the current on-track
-    running order from Live Race Media.
+    (4 hours before the broadcast start — qualifying runs all morning — to
+    ~6 hours after) returns the current on-track running order from Live Race
+    Media.
 
     With demo=true and no live event, replays the most recent completed event's
     timing feed so the live screen can be tested/demoed on any day.
@@ -374,7 +375,7 @@ def live(demo: bool = False):
         JOIN seasons se ON se.id = e.season_id
         JOIN series  s  ON s.id  = se.series_id
         WHERE e.start_time_utc IS NOT NULL
-          AND now() >= e.start_time_utc - interval '30 minutes'
+          AND now() >= e.start_time_utc - interval '4 hours'
           AND now() <= e.start_time_utc + interval '6 hours'
         ORDER BY e.start_time_utc
         LIMIT 1
