@@ -11,6 +11,7 @@ then open http://127.0.0.1:8000/docs
 import datetime
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo
 
@@ -420,9 +421,14 @@ def live(demo: bool = False):
     if not lrm_id:
         return {"live": True, "demo": is_demo, "event": ev, "timing": None}
 
-    race = _lrm_json(lrm_id, "race")
-    riders_raw = _lrm_json(lrm_id, "riders") or []
-    clock = _lrm_json(lrm_id, "clock")
+    # Fetch the three feed files in parallel — keeps the live view snappy.
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_race = ex.submit(_lrm_json, lrm_id, "race")
+        f_riders = ex.submit(_lrm_json, lrm_id, "riders")
+        f_clock = ex.submit(_lrm_json, lrm_id, "clock")
+        race = f_race.result()
+        riders_raw = f_riders.result() or []
+        clock = f_clock.result()
 
     riders = [
         {
