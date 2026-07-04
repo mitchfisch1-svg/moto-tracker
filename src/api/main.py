@@ -404,6 +404,16 @@ def live(demo: bool = False):
 
     ev = dict(rows[0])
     lrm_id = ev.pop("lrm_id", None) or _derive_lrm_id(ev["event_id"], ev["source_url"])
+    if not lrm_id:
+        # The event's own results page may not exist yet (common on race
+        # morning). The LRM feed is series-wide — event_files/{id}/ carries
+        # whatever race is on track NOW — so fall back to the most recently
+        # cached id.
+        fb = query(
+            "SELECT lrm_id FROM events WHERE lrm_id IS NOT NULL "
+            "ORDER BY event_date DESC LIMIT 1"
+        )
+        lrm_id = fb[0]["lrm_id"] if fb else None
     ev.pop("source_url", None)
     ev = _decorate_event(ev)
     if not lrm_id:

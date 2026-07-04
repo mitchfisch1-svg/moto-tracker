@@ -61,45 +61,65 @@ def update_event_statuses(conn) -> int:
         return cur.fetchone()[0]
 
 
-# --- jobs ------------------------------------------------------------------
-def job_schedule():
+# --- job work (raises on failure) -------------------------------------------
+def schedule_work():
     log.info("schedule: starting")
+    count = ScheduleSMXAdapter().run()
+    log.info("schedule: done (%s events)", count)
+
+
+def news_work():
+    log.info("news: starting")
+    count = NewsRSSAdapter().run()
+    log.info("news: done (%s articles)", count)
+
+
+def results_work():
+    with get_connection() as conn:
+        live = update_event_statuses(conn)
+        if not live:
+            log.info("results: no live events; skipping")
+            return
+        events = select_events(conn, target_status="live")
+        if not events:
+            # Race morning: the event is live but its results link wasn't on
+            # the schedule page when we last scraped. Refresh and retry once.
+            log.info("results: %s live event(s) without a results id — "
+                     "refreshing schedule", live)
+            ScheduleSMXAdapter().run()
+            events = select_events(conn, target_status="live")
+        if not events:
+            log.info("results: still no results id for the live event(s)")
+            return
+        log.info("results: ingesting %s live event(s)", len(events))
+        adapter = ResultsHTMLAdapter()
+        season_ids = set()
+        for ev in events:
+            adapter.ingest_event(conn, ev)
+            season_ids.add(ev["season_id"])
+        for sid in season_ids:
+            recompute_standings(conn, season_id=sid)
+        log.info("results: done")
+
+
+# --- scheduler wrappers (catch + log so one bad run doesn't kill the loop) ---
+def job_schedule():
     try:
-        count = ScheduleSMXAdapter().run()
-        log.info("schedule: done (%s events)", count)
+        schedule_work()
     except Exception:
         log.exception("schedule: failed")
 
 
 def job_news():
-    log.info("news: starting")
     try:
-        count = NewsRSSAdapter().run()
-        log.info("news: done (%s articles)", count)
+        news_work()
     except Exception:
         log.exception("news: failed")
 
 
 def job_results():
     try:
-        with get_connection() as conn:
-            live = update_event_statuses(conn)
-            if not live:
-                log.info("results: no live events; skipping")
-                return
-            events = select_events(conn, target_status="live")
-            if not events:
-                log.info("results: %s live event(s) but none have a results id", live)
-                return
-            log.info("results: ingesting %s live event(s)", len(events))
-            adapter = ResultsHTMLAdapter()
-            season_ids = set()
-            for ev in events:
-                adapter.ingest_event(conn, ev)
-                season_ids.add(ev["season_id"])
-            for sid in season_ids:
-                recompute_standings(conn, season_id=sid)
-            log.info("results: done")
+        results_work()
     except Exception:
         log.exception("results: failed")
 
@@ -123,7 +143,8 @@ def main():
     args = ap.parse_args()
 
     if args.job:
-        {"schedule": job_schedule, "news": job_news, "results": job_results}[
+        # CI mode: let exceptions propagate so a broken run shows up red.
+        {"schedule": schedule_work, "news": news_work, "results": results_work}[
             args.job
         ]()
         return
