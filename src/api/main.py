@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo
 
 import requests
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
@@ -102,8 +103,8 @@ def root():
         "docs": "/docs",
         "endpoints": [
             "/series", "/schedule", "/schedule/next", "/standings", "/live",
-            "/recap", "/news", "/riders", "/riders/{id}", "/events/{id}",
-            "/health",
+            "/live/sessions", "/live/sessions/{race_id}", "/recap", "/news",
+            "/riders", "/riders/{id}", "/events/{id}", "/health",
         ],
     }
 
@@ -459,6 +460,104 @@ def live(demo: bool = False):
         "riders": riders,
     }
     return {"live": True, "demo": is_demo, "event": ev, "timing": timing}
+
+
+# --- session results (race-day program browser) -------------------------------
+# The results site publishes every session's finishing order as it completes;
+# its /results/ homepage always shows the current/most recent event.
+_RESULTS_HOME = "https://results.supermotocross.com/results/"
+_RESULT_HEADER = ["POS", "#", "BIKE", "RIDER"]
+_POS_RE = re.compile(r"^(\d+|DNF|DNS|DSQ|DNQ)$", re.I)
+_RACE_LINK_RE = re.compile(r"view_race_result&(?:amp;)?id=(\d+)")
+
+# Bike makes recognized inside team names (kept in sync with results_html.py).
+_MAKES = ["KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS",
+          "Husqvarna", "Ducati", "Triumph", "Beta", "Stark"]
+
+
+def _make_from_team(team):
+    if not team:
+        return None
+    up = team.upper()
+    best, best_pos = None, -1
+    for make in _MAKES:
+        pos = up.rfind(make.upper())
+        if pos > best_pos:
+            best, best_pos = make, pos
+    return "GasGas" if best == "GASGAS" else best
+
+
+@app.get("/live/sessions")
+def live_sessions():
+    """All sessions of the current (or most recent) event, in program order."""
+    try:
+        resp = requests.get(_RESULTS_HOME, headers=_LRM_HEADERS, timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException:
+        raise HTTPException(status_code=502, detail="results site unavailable")
+    soup = BeautifulSoup(resp.text, "html.parser")
+    title = soup.title.string if soup.title and soup.title.string else ""
+    event_name = title.split("::")[-1].strip() if "::" in title else title.strip()
+
+    seen, sessions = set(), []
+    for a in soup.find_all("a", href=_RACE_LINK_RE):
+        href = a.get("href", "")
+        if "export=pdf" in href:
+            continue
+        rid = _RACE_LINK_RE.search(href).group(1)
+        if rid in seen:
+            continue
+        seen.add(rid)
+        sessions.append({"id": rid, "label": a.get_text(" ", strip=True)})
+    return {"event_name": event_name, "sessions": sessions}
+
+
+@app.get("/live/sessions/{race_id}")
+def live_session_results(race_id: int):
+    """Finishing order for one session, parsed from its results page."""
+    url = f"{_RESULTS_HOME}?p=view_race_result&id={race_id}"
+    try:
+        resp = requests.get(url, headers=_LRM_HEADERS, timeout=20)
+        resp.raise_for_status()
+    except requests.RequestException:
+        raise HTTPException(status_code=502, detail="results site unavailable")
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    table = header = None
+    for tb in soup.find_all("table"):
+        first = tb.find("tr")
+        if not first:
+            continue
+        cells = [c.get_text(" ", strip=True).upper() for c in first.find_all(["th", "td"])]
+        if cells[:4] == _RESULT_HEADER:
+            table, header = tb, cells
+            break
+    if table is None:
+        raise HTTPException(status_code=404, detail="results not posted yet")
+
+    rows = []
+    for tr in table.find_all("tr"):
+        cells = [c.get_text(" ", strip=True)
+                 for c in tr.find_all(["th", "td"], recursive=False)]
+        if len(cells) < 9 or not _POS_RE.match(cells[0] or ""):
+            continue
+        team = (cells[8] or "").strip() or None
+        name = re.sub(r"\s+HOLESHOT$", "", cells[3] or "", flags=re.I).strip()
+        rows.append({
+            "position": int(cells[0]) if cells[0].isdigit() else None,
+            "status": "finished" if cells[0].isdigit() else cells[0].lower(),
+            "number": (cells[1] or "").strip() or None,
+            "name": name.title(),
+            # Column semantics vary by session type (qualifying vs moto), so
+            # pass the site's own column labels through with the values.
+            "primary_label": header[4] if len(header) > 4 else "",
+            "primary": (cells[4] or "").strip() or None,
+            "secondary_label": header[5] if len(header) > 5 else "",
+            "secondary": (cells[5] or "").strip() or None,
+            "team": team,
+            "manufacturer": _make_from_team(team),
+        })
+    return {"race_id": race_id, "results": rows}
 
 
 # --- recap -------------------------------------------------------------------

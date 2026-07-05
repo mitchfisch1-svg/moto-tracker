@@ -6,4 +6,5 @@ psycopg[binary]
 psycopg-pool
 python-dotenv
 requests
+beautifulsoup4
 
