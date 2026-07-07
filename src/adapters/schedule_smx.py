@@ -234,17 +234,27 @@ class ScheduleSMXAdapter(BaseAdapter):
                 }
             )
 
-        return upsert(
-            conn,
-            "events",
-            db_rows,
-            conflict_cols=["season_id", "round_number"],
-            update_cols=[
-                "round_label", "region_250", "broadcast", "venue", "city",
-                "state", "event_date", "start_time_utc", "status",
-                "source_url", "updated_at",
-            ],
+        # Only overwrite source_url when the page actually links a results
+        # event; otherwise keep whatever we already have (the site is slow to
+        # add links, and /live + results ingest depend on a good one).
+        full_cols = [
+            "round_label", "region_250", "broadcast", "venue", "city",
+            "state", "event_date", "start_time_utc", "status",
+            "source_url", "updated_at",
+        ]
+        keep_url_cols = [c for c in full_cols if c != "source_url"]
+        with_link = [r for r in db_rows if "view_event" in (r["source_url"] or "")]
+        without_link = [r for r in db_rows if "view_event" not in (r["source_url"] or "")]
+
+        count = upsert(
+            conn, "events", with_link,
+            conflict_cols=["season_id", "round_number"], update_cols=full_cols,
         )
+        count += upsert(
+            conn, "events", without_link,
+            conflict_cols=["season_id", "round_number"], update_cols=keep_url_cols,
+        )
+        return count
 
     # --- helpers -----------------------------------------------------------
     @staticmethod
