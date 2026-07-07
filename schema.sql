@@ -176,6 +176,8 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS region_250 TEXT;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS broadcast TEXT;
 -- Live Race Media event id (for the live-timing JSON), derived + cached lazily.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS lrm_id TEXT;
+-- Ticket purchase link from the event card's "Buy Tickets" button.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS tickets_url TEXT;
 -- Bike make (KTM, Honda, Yamaha, ...) derived from the rider's team on results.
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS manufacturer TEXT;
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS hometown TEXT;

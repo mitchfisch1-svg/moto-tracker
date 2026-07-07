@@ -141,7 +141,8 @@ def schedule(
     sql = """
         SELECT e.id AS event_id, s.abbrev AS series, e.round_number,
                e.round_label, e.region_250, e.venue, e.city, e.state,
-               e.event_date, e.start_time_utc, e.status, e.broadcast
+               e.event_date, e.start_time_utc, e.status, e.broadcast,
+               e.tickets_url
         FROM events e
         JOIN seasons se ON se.id = e.season_id
         JOIN series  s  ON s.id  = se.series_id
@@ -164,7 +165,7 @@ def next_events(series: str | None = None, limit: int = Query(3, le=20)):
     sql = """
         SELECT e.id AS event_id, s.abbrev AS series, e.round_number,
                e.round_label, e.venue, e.city, e.state, e.event_date,
-               e.start_time_utc, e.status, e.broadcast
+               e.start_time_utc, e.status, e.broadcast, e.tickets_url
         FROM events e
         JOIN seasons se ON se.id = e.season_id
         JOIN series  s  ON s.id  = se.series_id
@@ -208,6 +209,43 @@ def standings(
         leader.setdefault(row["class"], row["points"])
         row["gap"] = leader[row["class"]] - row["points"]
     return rows
+
+
+@app.get("/standings/manufacturers")
+def manufacturer_standings(series: str, year: int | None = None):
+    """Manufacturers championship, official style: in each points-scoring
+    session, a make scores its best finisher's points."""
+    year = year or _current_year()
+    out = []
+    for cls in ("450", "250"):
+        rows = query(
+            """
+            SELECT make AS manufacturer,
+                   SUM(best_pts)::int AS points,
+                   COUNT(*) FILTER (WHERE best_pos = 1) AS wins
+            FROM (
+                SELECT r.session_id, ri.manufacturer AS make,
+                       MAX(r.points) AS best_pts, MIN(r.position) AS best_pos
+                FROM results r
+                JOIN riders   ri ON ri.id = r.rider_id
+                JOIN sessions s  ON s.id  = r.session_id
+                JOIN events   e  ON e.id  = s.event_id
+                JOIN seasons  se ON se.id = e.season_id
+                JOIN series   sr ON sr.id = se.series_id
+                WHERE sr.abbrev = %s AND se.year = %s AND s.class = %s
+                  AND s.type IN ('main', 'moto')
+                  AND ri.manufacturer IS NOT NULL
+                GROUP BY r.session_id, ri.manufacturer
+            ) t
+            GROUP BY make
+            ORDER BY points DESC
+            """,
+            [series.upper(), year, cls],
+        )
+        for i, r in enumerate(rows, start=1):
+            r["position"] = i
+        out.append({"class": cls, "rows": rows})
+    return out
 
 
 # --- news ------------------------------------------------------------------

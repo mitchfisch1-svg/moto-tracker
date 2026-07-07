@@ -113,6 +113,14 @@ def parse_broadcast(card):
     return json.dumps(listings) if listings else None
 
 
+def parse_tickets_url(card):
+    """The card's 'Buy Tickets' button link, or None."""
+    for a in card.find_all("a", href=True):
+        if re.search(r"ticket", a.get_text(" ", strip=True), re.I):
+            return a["href"]
+    return None
+
+
 def parse_250_region(race_type):
     """From a card's race-type text, find the 250 region: 'E', 'W', 'EW', or None.
 
@@ -192,6 +200,7 @@ class ScheduleSMXAdapter(BaseAdapter):
                     "round_label": round_label,
                     "region_250": parse_250_region(race_type),
                     "broadcast": parse_broadcast(card),
+                    "tickets_url": parse_tickets_url(card),
                     "venue": venue,
                     "city": city,
                     "state": state,
@@ -223,6 +232,7 @@ class ScheduleSMXAdapter(BaseAdapter):
                     "round_label": r["round_label"],
                     "region_250": r["region_250"],
                     "broadcast": r["broadcast"],
+                    "tickets_url": r["tickets_url"],
                     "venue": r["venue"],
                     "city": r["city"],
                     "state": r["state"],
@@ -238,8 +248,8 @@ class ScheduleSMXAdapter(BaseAdapter):
         # event; otherwise keep whatever we already have (the site is slow to
         # add links, and /live + results ingest depend on a good one).
         full_cols = [
-            "round_label", "region_250", "broadcast", "venue", "city",
-            "state", "event_date", "start_time_utc", "status",
+            "round_label", "region_250", "broadcast", "tickets_url", "venue",
+            "city", "state", "event_date", "start_time_utc", "status",
             "source_url", "updated_at",
         ]
         keep_url_cols = [c for c in full_cols if c != "source_url"]
