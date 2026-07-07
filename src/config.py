@@ -20,7 +20,9 @@ def get_database_url() -> str:
 
     Use this anywhere a database connection is needed so failures are obvious.
     """
-    url = os.getenv("DATABASE_URL")
+    # strip() guards against invisible whitespace/newlines that sneak in when
+    # the value is pasted into a secrets UI (this broke every CI run once).
+    url = (os.getenv("DATABASE_URL") or "").strip()
     if not url:
         raise RuntimeError(
             "DATABASE_URL is not set. Copy .env.example to .env and paste your "
