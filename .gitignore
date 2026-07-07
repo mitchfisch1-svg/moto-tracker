@@ -21,3 +21,6 @@ Thumbs.db
 # Unrelated projects living in this folder — never commit
 stock-scout/
 .claude/launch.json
+
+# Rendered recap videos (published to the media branch, not main)
+recap_out/

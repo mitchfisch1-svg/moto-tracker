@@ -6,6 +6,7 @@ feedparser
 pdfplumber
 rapidfuzz
 APScheduler
+imageio-ffmpeg
 fastapi
 uvicorn[standard]
 psycopg-pool
