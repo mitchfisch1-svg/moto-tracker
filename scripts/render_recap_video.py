@@ -228,14 +228,15 @@ def center_text(d, y, text, f, fill, alpha=1.0):
 
 
 def wordmark(d, y, size=34, alpha=1.0):
+    """Brand wordmark: MOTO X TRACKER with the X in orange."""
     f = font(size, italic=True)
-    t1, t2 = "MOTO ", "TRACKER"
-    b1 = d.textbbox((0, 0), t1, font=f)
-    b2 = d.textbbox((0, 0), t2, font=f)
-    total = (b1[2] - b1[0]) + (b2[2] - b2[0])
+    parts = [("MOTO ", WHITE), ("X", ORANGE), (" TRACKER", WHITE)]
+    widths = [d.textbbox((0, 0), txt, font=f) for txt, _ in parts]
+    total = sum(b[2] - b[0] for b in widths)
     x = (W - total) / 2
-    d.text((x, y), t1, font=f, fill=(*WHITE, int(255 * alpha)))
-    d.text((x + b1[2] - b1[0], y), t2, font=f, fill=(*ORANGE, int(255 * alpha)))
+    for (txt, color), b in zip(parts, widths):
+        d.text((x - b[0], y), txt, font=f, fill=(*color, int(255 * alpha)))
+        x += b[2] - b[0]
 
 
 def fmt_date(iso):
@@ -350,11 +351,17 @@ def scene_outro(data, t):
                         radius=52, fill=(*ORANGE, int(255 * a)))
     d.rounded_rectangle([x0, y0, x0 + pw, y0 + ph], radius=44,
                         fill=(*WHITE, int(255 * a)))
-    f = font(120, True)
-    bb = d.textbbox((0, 0), "MT", font=f)
-    d.text((x0 + (pw - bb[2] + bb[0]) / 2 - bb[0],
-            y0 + (ph - bb[3] + bb[1]) / 2 - bb[1]),
-           "MT", font=f, fill=(*BG, int(255 * a)))
+    f = font(96, True)
+    parts = [("M", (*BG, int(255 * a))), ("X", (*ORANGE, int(255 * a))),
+             ("T", (*BG, int(255 * a)))]
+    widths = [d.textbbox((0, 0), txt, font=f) for txt, _ in parts]
+    total = sum(b[2] - b[0] for b in widths)
+    bb = d.textbbox((0, 0), "MXT", font=f)
+    tx = x0 + (pw - total) / 2
+    ty = y0 + (ph - bb[3] + bb[1]) / 2 - bb[1]
+    for (txt, color), b in zip(parts, widths):
+        d.text((tx - b[0], ty), txt, font=f, fill=color)
+        tx += b[2] - b[0]
     wordmark(d, 640, 44, ease((t - 0.15) / 0.3))
     if data["next"]:
         nx = data["next"]

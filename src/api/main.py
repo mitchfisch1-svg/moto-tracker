@@ -113,12 +113,13 @@ def root():
 
 _PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} — Moto Tracker</title>
+<title>{title} — MXT</title>
 <style>body{{background:#0f1115;color:#f2f4f8;font-family:-apple-system,Segoe UI,
 Roboto,sans-serif;max-width:640px;margin:0 auto;padding:32px 20px;line-height:1.6}}
 h1{{font-style:italic}}h1 span{{color:#ff5a1f}}a{{color:#ff5a1f}}
 p,li{{color:#c7cdd6}}</style></head>
-<body><h1>MOTO<span> TRACKER</span></h1>{body}</body></html>"""
+<body><h1>M<span>X</span>T <small style="font-size:.45em;color:#9aa4b2">
+MOTO X TRACKER</small></h1>{body}</body></html>"""
 
 
 @app.get("/privacy", response_class=HTMLResponse)
@@ -126,7 +127,8 @@ def privacy():
     return _PAGE.format(title="Privacy Policy", body="""
 <h2>Privacy Policy</h2>
 <p><em>Effective July 7, 2026</em></p>
-<p>Moto Tracker does not collect, store, or share any personal information.</p>
+<p>MXT (Moto X Tracker) does not collect, store, or share any personal
+information.</p>
 <ul>
 <li><b>No accounts.</b> The app has no sign-up or login.</li>
 <li><b>No tracking.</b> The app contains no analytics, advertising, or
@@ -146,8 +148,10 @@ websites governed by their own privacy policies.</li>
 def support():
     return _PAGE.format(title="Support", body="""
 <h2>Support</h2>
-<p>Moto Tracker shows AMA Supercross, Pro Motocross, and SuperMotocross
-schedules, live timing, results, standings, and news.</p>
+<p>MXT (Moto X Tracker) is an unofficial fan app showing AMA Supercross,
+Pro Motocross, and SuperMotocross schedules, live timing, results, standings,
+and news. It is not affiliated with or endorsed by AMA, Feld Motor Sports, or
+MX Sports.</p>
 <p>For help, feedback, or feature requests, email
 <a href="mailto:mitchfisch1@gmail.com">mitchfisch1@gmail.com</a>.</p>
 <p><a href="/privacy">Privacy policy</a></p>""")
