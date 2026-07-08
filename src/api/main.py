@@ -11,6 +11,7 @@ then open http://127.0.0.1:8000/docs
 import datetime
 import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo
@@ -161,6 +162,91 @@ def health():
     return {"status": "ok", "db": True}
 
 
+# --- race-day weather (open-meteo, free, no key) -----------------------------
+_WEATHER_CACHE: dict = {}   # cache key -> (expires_at, payload)
+_WEATHER_TTL = 1800         # refresh at most every 30 min
+
+_STATE_NAMES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota",
+    "MS": "Mississippi", "MO": "Missouri", "MT": "Montana", "NE": "Nebraska",
+    "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey",
+    "NM": "New Mexico", "NY": "New York", "NC": "North Carolina",
+    "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma", "OR": "Oregon",
+    "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+    "VT": "Vermont", "VA": "Virginia", "WA": "Washington",
+    "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+}
+
+_WMO_CODES = [
+    ({0}, "Clear", "☀️"), ({1, 2}, "Partly cloudy", "⛅"), ({3}, "Cloudy", "☁️"),
+    ({45, 48}, "Fog", "🌫️"), ({51, 53, 55, 56, 57}, "Drizzle", "🌦️"),
+    ({61, 63, 65, 66, 67}, "Rain", "🌧️"),
+    ({71, 73, 75, 77, 85, 86}, "Snow", "❄️"),
+    ({80, 81, 82}, "Showers", "🌦️"), ({95, 96, 99}, "Thunderstorms", "⛈️"),
+]
+
+
+def _wmo_label(code):
+    for codes, label, icon in _WMO_CODES:
+        if code in codes:
+            return label, icon
+    return "Mixed", "🌤️"
+
+
+def _event_weather(city, state, event_date):
+    """Race-day forecast at the venue's city, or None (fails soft, cached)."""
+    if not city or not event_date:
+        return None
+    key = f"{city}|{state}|{event_date}"
+    hit = _WEATHER_CACHE.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+
+    out = None
+    try:
+        geo = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": city, "count": 10, "country_code": "US"},
+            timeout=8,
+        ).json().get("results") or []
+        want = _STATE_NAMES.get((state or "").upper())
+        spot = next((g for g in geo if not want or g.get("admin1") == want),
+                    geo[0] if geo else None)
+        if spot:
+            fc = requests.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": spot["latitude"], "longitude": spot["longitude"],
+                    "daily": "weather_code,temperature_2m_max,temperature_2m_min,"
+                             "precipitation_probability_max",
+                    "temperature_unit": "fahrenheit", "timezone": "auto",
+                    "start_date": str(event_date), "end_date": str(event_date),
+                },
+                timeout=8,
+            ).json().get("daily") or {}
+            if fc.get("time"):
+                label, icon = _wmo_label((fc["weather_code"] or [None])[0])
+                out = {
+                    "summary": label,
+                    "icon": icon,
+                    "high_f": round(fc["temperature_2m_max"][0]),
+                    "low_f": round(fc["temperature_2m_min"][0]),
+                    "rain_chance": (fc.get("precipitation_probability_max")
+                                    or [None])[0],
+                }
+    except Exception:
+        out = None  # forecast horizon exceeded, network hiccup, etc.
+
+    _WEATHER_CACHE[key] = (time.time() + _WEATHER_TTL, out)
+    return out
+
+
 # --- series + schedule -----------------------------------------------------
 @app.get("/series")
 def list_series():
@@ -220,7 +306,11 @@ def next_events(series: str | None = None, limit: int = Query(3, le=20)):
         params.append(series.upper())
     sql += " ORDER BY e.event_date LIMIT %s"
     params.append(limit)
-    return [_decorate_event(r) for r in query(sql, params)]
+    rows = [_decorate_event(r) for r in query(sql, params)]
+    if rows:  # race-day forecast for the very next event only
+        rows[0]["weather"] = _event_weather(
+            rows[0].get("city"), rows[0].get("state"), rows[0].get("event_date"))
+    return rows
 
 
 # --- standings -------------------------------------------------------------
