@@ -105,8 +105,8 @@ def root():
         "docs": "/docs",
         "endpoints": [
             "/series", "/schedule", "/schedule/next", "/standings", "/live",
-            "/live/sessions", "/live/sessions/{race_id}", "/recap", "/news",
-            "/riders", "/riders/{id}", "/events/{id}", "/health",
+            "/live/sessions", "/live/sessions/{race_id}", "/recap", "/rundown",
+            "/news", "/riders", "/riders/{id}", "/events/{id}", "/health",
         ],
     }
 
@@ -733,6 +733,212 @@ def live_session_results(race_id: int):
             "manufacturer": _make_from_team(team),
         })
     return {"race_id": race_id, "results": rows}
+
+
+# --- rundown (newcomer "catch me up" on the current field) -------------------
+_SERIES_LONG = {"SX": "Supercross", "MX": "Pro Motocross", "SMX": "SuperMotocross"}
+
+
+def _first_name(full):
+    return (full or "").split(" ")[0]
+
+
+def _last_name(full):
+    return (full or "").split(" ")[-1]
+
+
+def _title_fight_line(leader, chaser, gap, rounds_left):
+    if not chaser:
+        return f"{leader} leads the championship."
+    left = (f" with {rounds_left} round{'s' if rounds_left != 1 else ''} left"
+            if rounds_left else "")
+    if gap <= 8:
+        return (f"{_first_name(leader)} holds a slim {gap}-point lead over "
+                f"{_first_name(chaser)}{left} — this one's anyone's.")
+    if gap <= 25:
+        return (f"{_first_name(leader)} leads {_first_name(chaser)} by {gap} "
+                f"points{left}, but it's far from over.")
+    return (f"{_first_name(leader)} has built a commanding {gap}-point lead over "
+            f"{_first_name(chaser)}{left}.")
+
+
+@app.get("/rundown")
+def rundown():
+    """A newcomer-friendly 'catch me up' on the currently-active series."""
+    year = _current_year()
+
+    # Active series = the next upcoming event's, else the latest completed one's.
+    nxt = query(
+        """
+        SELECT s.abbrev, e.venue, e.event_date
+        FROM events e JOIN seasons se ON se.id = e.season_id
+        JOIN series s ON s.id = se.series_id
+        WHERE e.event_date >= CURRENT_DATE ORDER BY e.event_date LIMIT 1
+        """
+    )
+    active = None
+    if nxt:
+        active = nxt[0]["abbrev"]
+        next_event = {"series": nxt[0]["abbrev"], "venue": nxt[0]["venue"],
+                      "date": str(nxt[0]["event_date"])}
+    else:
+        next_event = None
+    if not active:
+        recent = query(
+            """
+            SELECT s.abbrev FROM events e JOIN seasons se ON se.id = e.season_id
+            JOIN series s ON s.id = se.series_id
+            WHERE e.status = 'final' ORDER BY e.event_date DESC LIMIT 1
+            """
+        )
+        active = recent[0]["abbrev"] if recent else "MX"
+
+    # Season progress for the active series.
+    prog = query(
+        """
+        SELECT count(*) AS total,
+               count(*) FILTER (WHERE e.status = 'final') AS done
+        FROM events e JOIN seasons se ON se.id = e.season_id
+        JOIN series s ON s.id = se.series_id
+        WHERE s.abbrev = %s AND se.year = %s
+        """,
+        [active, year],
+    )
+    total = prog[0]["total"] if prog else 0
+    done = prog[0]["done"] if prog else 0
+    rounds_left = max(0, total - done)
+
+    # Latest completed round of the active series (for "won last round").
+    last = query(
+        """
+        SELECT e.id, e.venue FROM events e JOIN seasons se ON se.id = e.season_id
+        JOIN series s ON s.id = se.series_id
+        WHERE s.abbrev = %s AND e.status = 'final'
+          AND EXISTS (SELECT 1 FROM sessions x JOIN results r ON r.session_id = x.id
+                      WHERE x.event_id = e.id)
+        ORDER BY e.event_date DESC LIMIT 1
+        """,
+        [active],
+    )
+    last_venue = last[0]["venue"] if last else None
+    last_winner = {}  # class -> winner name
+    if last:
+        wr = query(
+            """
+            SELECT sess.class, ri.full_name, SUM(r.points) AS pts
+            FROM results r JOIN sessions sess ON sess.id = r.session_id
+            JOIN riders ri ON ri.id = r.rider_id
+            WHERE sess.event_id = %s AND sess.type = ANY(%s)
+            GROUP BY sess.class, ri.full_name
+            ORDER BY sess.class, pts DESC
+            """,
+            [last[0]["id"], ["main", "moto"]],
+        )
+        for row in wr:
+            last_winner.setdefault(row["class"], row["full_name"])
+
+    # Standings top-5 per class for the active series.
+    rows = query(
+        """
+        SELECT st.class, st.position, r.id AS rider_id, r.full_name, r.number,
+               r.manufacturer, r.headshot_url, r.hometown,
+               st.points, st.wins, st.podiums
+        FROM standings st JOIN seasons se ON se.id = st.season_id
+        JOIN series s ON s.id = se.series_id JOIN riders r ON r.id = st.rider_id
+        WHERE s.abbrev = %s AND se.year = %s AND st.position <= 5
+        ORDER BY st.class, st.position
+        """,
+        [active, year],
+    )
+    by_class = {}
+    for r in rows:
+        by_class.setdefault(r["class"], []).append(r)
+
+    def class_sort(c):  # 450 first, then 250 variants
+        return (0 if c.startswith("450") else 1, c)
+
+    classes = []
+    for cls in sorted(by_class, key=class_sort):
+        cr = by_class[cls]
+        leader, chaser = cr[0], (cr[1] if len(cr) > 1 else None)
+        gap = (chaser["points"] and leader["points"] - chaser["points"]) if chaser else 0
+        classes.append({
+            "class": cls,
+            "leader": {k: leader[k] for k in
+                       ("full_name", "number", "manufacturer", "headshot_url",
+                        "hometown", "points", "wins", "podiums")},
+            "chaser": ({"full_name": chaser["full_name"], "gap": gap}
+                       if chaser else None),
+            "title_fight": _title_fight_line(
+                leader["full_name"], chaser["full_name"] if chaser else None,
+                gap, rounds_left),
+            "won_last_round": last_winner.get(cls),
+            "top5": [{"position": x["position"], "full_name": x["full_name"],
+                      "number": x["number"], "manufacturer": x["manufacturer"],
+                      "points": x["points"]} for x in cr],
+        })
+
+    # Auto-generated storylines.
+    storylines = []
+    for c in classes:
+        names = [x["full_name"] for x in c["top5"][:3]]
+        surs = [_last_name(n) for n in names]
+        for sur in set(surs):
+            if surs.count(sur) >= 2:
+                who = [n for n in names if _last_name(n) == sur]
+                storylines.append(
+                    f"👨‍👦 The {sur} family is running the {c['class']} class — "
+                    f"{' and '.join(_first_name(n) for n in who)} sit inside the top 3.")
+                break
+    for c in classes:
+        if c["chaser"] and c["chaser"]["gap"] <= 8:
+            storylines.append(
+                f"🔥 The {c['class']} title is on a knife's edge — just "
+                f"{c['chaser']['gap']} points separate the top two.")
+    if last_venue and last_winner:
+        first_cls = classes[0]["class"] if classes else None
+        w = last_winner.get(first_cls)
+        if w:
+            storylines.append(f"🏁 {_first_name(w)} took the win at {last_venue}.")
+
+    # One-line nod to the series that already wrapped (context for newcomers).
+    prev_note = None
+    if active == "MX":
+        champ = query(
+            """
+            SELECT r.full_name FROM standings st
+            JOIN seasons se ON se.id = st.season_id
+            JOIN series s ON s.id = se.series_id JOIN riders r ON r.id = st.rider_id
+            WHERE s.abbrev = 'SX' AND st.class = '450' AND st.position = 1
+              AND se.year = %s LIMIT 1
+            """,
+            [year],
+        )
+        if champ:
+            prev_note = (f"Supercross wrapped up earlier this year — "
+                         f"{champ[0]['full_name']} took the 450 title. Now the "
+                         f"series moves outdoors for Pro Motocross.")
+
+    how_it_works = [
+        "The year has three championships: Supercross (winter, in stadiums), "
+        "Pro Motocross (summer, outdoors), and the SuperMotocross playoffs (fall).",
+        "Two classes race at every round: 450 (the premier class, the stars) and "
+        "250 (the up-and-comers).",
+        "In Motocross each round is two races (motos) — combine both finishes for "
+        "the overall. Most points at season's end wins the title.",
+    ]
+
+    return {
+        "series": active,
+        "series_long": _SERIES_LONG.get(active, active),
+        "as_of": f"after {last_venue}" if last_venue else "preseason",
+        "rounds_done": done, "rounds_total": total, "rounds_left": rounds_left,
+        "how_it_works": how_it_works,
+        "previous_series_note": prev_note,
+        "classes": classes,
+        "storylines": storylines,
+        "next_event": next_event,
+    }
 
 
 # --- recap -------------------------------------------------------------------
