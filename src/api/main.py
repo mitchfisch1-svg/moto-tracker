@@ -865,17 +865,18 @@ def rundown():
         classes.append({
             "class": cls,
             "leader": {k: leader[k] for k in
-                       ("full_name", "number", "manufacturer", "headshot_url",
-                        "hometown", "points", "wins", "podiums")},
+                       ("rider_id", "full_name", "number", "manufacturer",
+                        "headshot_url", "hometown", "points", "wins", "podiums")},
             "chaser": ({"full_name": chaser["full_name"], "gap": gap}
                        if chaser else None),
             "title_fight": _title_fight_line(
                 leader["full_name"], chaser["full_name"] if chaser else None,
                 gap, rounds_left),
             "won_last_round": last_winner.get(cls),
-            "top5": [{"position": x["position"], "full_name": x["full_name"],
-                      "number": x["number"], "manufacturer": x["manufacturer"],
-                      "points": x["points"]} for x in cr],
+            "top5": [{"rider_id": x["rider_id"], "position": x["position"],
+                      "full_name": x["full_name"], "number": x["number"],
+                      "manufacturer": x["manufacturer"], "points": x["points"]}
+                     for x in cr],
         })
 
     # Auto-generated storylines.
