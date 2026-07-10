@@ -26,9 +26,8 @@ jobs:
       - run: python scripts/render_recap_video.py --out media_out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      - run: python scripts/render_season_video.py --out media_out
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # Season "State of the Series" video is parked — render step intentionally
+      # disabled. scripts/render_season_video.py is kept for a future redesign.
       - name: Publish to media branch
         run: |
           # Start from whatever is already published so we never drop a video
