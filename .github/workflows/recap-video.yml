@@ -23,19 +23,27 @@ jobs:
           cache: pip
       - run: sudo apt-get install -y fonts-liberation
       - run: pip install -r requirements.txt
-      - run: python scripts/render_recap_video.py --out recap_out
+      - run: python scripts/render_recap_video.py --out media_out
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - run: python scripts/render_season_video.py --out media_out
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Publish to media branch
         run: |
-          if [ ! -f recap_out/recap.mp4 ]; then
-            echo "Nothing rendered (already up to date)."
+          # Start from whatever is already published so we never drop a video
+          # that this run didn't re-render.
+          git fetch origin media || true
+          git worktree add media_pub origin/media 2>/dev/null || (mkdir -p media_pub && cd media_pub && git init -b media)
+          cp -f media_out/recap.mp4 media_out/recap.json media_pub/ 2>/dev/null || true
+          cp -f media_out/season.mp4 media_out/season.json media_pub/ 2>/dev/null || true
+          cd media_pub
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No new videos to publish."
             exit 0
           fi
-          cd recap_out
-          git init -b media
           git config user.name "recap-bot"
           git config user.email "actions@github.com"
-          git add recap.mp4 recap.json
-          git commit -m "Recap video: $(python -c "import json;print(json.load(open('recap.json'))['event_key'])")"
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" media
+          git add -A
+          git commit -m "Auto videos $(date -u +%Y-%m-%d)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:media

@@ -22,5 +22,7 @@ Thumbs.db
 stock-scout/
 .claude/launch.json
 
-# Rendered recap videos (published to the media branch, not main)
+# Rendered videos (published to the media branch, not main)
 recap_out/
+season_out/
+media_out/
