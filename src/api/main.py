@@ -649,6 +649,31 @@ _RACE_LINK_RE = re.compile(r"view_race_result&(?:amp;)?id=(\d+)")
 _MAKES = ["KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS",
           "Husqvarna", "Ducati", "Triumph", "Beta", "Stark"]
 
+# Both session endpoints scrape the results site on demand; short TTL caches
+# make chip-taps in the app instant and shield the site from per-user polling.
+_SESSIONS_CACHE: dict = {}   # key -> (expires_at, payload)
+_SESSIONS_LIST_TTL = 30      # the day's session list (new ones post ~each half hour)
+_SESSION_RESULT_TTL = 120    # one session's finishing order (final once posted)
+
+
+def _sessions_cache_get(key):
+    hit = _SESSIONS_CACHE.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    return None
+
+
+def _session_kind(label: str) -> str:
+    """Classify a session by its label so the app can group and explain it."""
+    low = (label or "").lower()
+    if "lcq" in low or "last chance" in low:
+        return "lcq"
+    if "qual" in low or "practice" in low:
+        return "qualifying"
+    if "heat" in low:
+        return "heat"
+    return "race"   # motos, main events, Triple Crown races
+
 
 def _make_from_team(team):
     if not team:
@@ -664,7 +689,15 @@ def _make_from_team(team):
 
 @app.get("/live/sessions")
 def live_sessions():
-    """All sessions of the current (or most recent) event, in program order."""
+    """All sessions of the current (or most recent) event, in program order.
+
+    The results site only lists a session once its results are posted, so every
+    entry here is a completed session — the app marks these done and infers
+    what's still to come from the day's program.
+    """
+    cached = _sessions_cache_get("list")
+    if cached is not None:
+        return cached
     try:
         resp = requests.get(_RESULTS_HOME, headers=_LRM_HEADERS, timeout=15)
         resp.raise_for_status()
@@ -683,13 +716,20 @@ def live_sessions():
         if rid in seen:
             continue
         seen.add(rid)
-        sessions.append({"id": rid, "label": a.get_text(" ", strip=True)})
-    return {"event_name": event_name, "sessions": sessions}
+        label = a.get_text(" ", strip=True)
+        sessions.append({"id": rid, "label": label,
+                         "kind": _session_kind(label), "status": "complete"})
+    payload = {"event_name": event_name, "sessions": sessions}
+    _SESSIONS_CACHE["list"] = (time.time() + _SESSIONS_LIST_TTL, payload)
+    return payload
 
 
 @app.get("/live/sessions/{race_id}")
 def live_session_results(race_id: int):
     """Finishing order for one session, parsed from its results page."""
+    cached = _sessions_cache_get(race_id)
+    if cached is not None:
+        return cached
     url = f"{_RESULTS_HOME}?p=view_race_result&id={race_id}"
     try:
         resp = requests.get(url, headers=_LRM_HEADERS, timeout=20)
@@ -732,7 +772,9 @@ def live_session_results(race_id: int):
             "team": team,
             "manufacturer": _make_from_team(team),
         })
-    return {"race_id": race_id, "results": rows}
+    payload = {"race_id": race_id, "results": rows}
+    _SESSIONS_CACHE[race_id] = (time.time() + _SESSION_RESULT_TTL, payload)
+    return payload
 
 
 # --- rundown (newcomer "catch me up" on the current field) -------------------
