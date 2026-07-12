@@ -653,7 +653,8 @@ _MAKES = ["KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS",
 # make chip-taps in the app instant and shield the site from per-user polling.
 _SESSIONS_CACHE: dict = {}   # key -> (expires_at, payload)
 _SESSIONS_LIST_TTL = 30      # the day's session list (new ones post ~each half hour)
-_SESSION_RESULT_TTL = 120    # one session's finishing order (final once posted)
+_SESSION_RESULT_TTL = 21600  # one session's finishing order — final once posted, so
+                             # keep it warm all race day (6h) instead of re-scraping
 
 
 def _sessions_cache_get(key):
