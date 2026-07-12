@@ -11,6 +11,7 @@ then open http://127.0.0.1:8000/docs
 import datetime
 import json
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -27,9 +28,24 @@ from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
 from ..config import get_database_url
+from ..notify import notify_work
 
 # A small connection pool so requests reuse connections instead of reconnecting.
 _pool: ConnectionPool | None = None
+
+# Push-notification checks run here, in the always-warm API process, every 60s
+# — far faster than the 5-min (often delayed) CI cron, which stays as a backup.
+# An advisory lock inside notify_work() makes overlapping runners harmless.
+_NOTIFY_INTERVAL_S = 60
+
+
+def _notify_loop():
+    while True:
+        try:
+            notify_work()
+        except Exception:
+            pass   # never let a bad cycle kill the loop
+        time.sleep(_NOTIFY_INTERVAL_S)
 
 
 @asynccontextmanager
@@ -43,6 +59,7 @@ async def lifespan(app: FastAPI):
         open=False,
     )
     _pool.open()
+    threading.Thread(target=_notify_loop, daemon=True, name="notify-loop").start()
     try:
         yield
     finally:

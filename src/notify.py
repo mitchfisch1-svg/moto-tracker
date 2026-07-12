@@ -227,12 +227,24 @@ def _rider_news(cur):
 
 
 def notify_work():
-    """Run every trigger once. Called by the scheduler (--job notify)."""
+    """Run every trigger once.
+
+    Called every 60s by a background loop in the API (the always-warm Render
+    process) and every 5 min by CI as a backup. A session-scoped advisory lock
+    keeps overlapping runners from double-sending; it auto-releases when the
+    connection closes. The 'heartbeat' ledger row records the last completed
+    run so liveness is checkable from the DB.
+    """
     log.info("notify: starting")
     with get_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(981234567)")
+            if not cur.fetchone()[0]:
+                log.info("notify: another runner holds the lock; skipping")
+                return
             _gate_drop(cur)
             _rider_results(cur)
             _championship(cur)
             _rider_news(cur)
+            _mark(cur, "heartbeat")
     log.info("notify: done")
