@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
+from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
 from ..config import get_database_url
@@ -671,6 +672,40 @@ def _sessions_cache_get(key):
     return None
 
 
+def _db_cache_get(key: str):
+    """Read a pre-stored session payload from the DB (None if absent/unavailable).
+
+    Completed session results are immutable, so the DB copy is authoritative and
+    serving it skips the slow results-site scrape entirely.
+    """
+    try:
+        rows = query(
+            "SELECT payload FROM scraped_session_cache WHERE cache_key = %s", (key,)
+        )
+        return rows[0]["payload"] if rows else None
+    except Exception:
+        return None   # table not migrated yet / DB hiccup — fall back to scraping
+
+
+def _db_cache_put(key: str, payload) -> None:
+    """Persist a scraped session payload so future reads (even after a restart,
+    or from a cold new process) skip the scrape. Best-effort."""
+    try:
+        with _pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO scraped_session_cache (cache_key, payload, updated_at)
+                    VALUES (%s, %s, now())
+                    ON CONFLICT (cache_key)
+                    DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()
+                    """,
+                    (key, Json(payload)),
+                )
+    except Exception:
+        pass   # in-memory cache still serves this process
+
+
 def _session_kind(label: str) -> str:
     """Classify a session by its label so the app can group and explain it."""
     low = (label or "").lower()
@@ -714,6 +749,9 @@ def live_sessions():
         resp = requests.get(_RESULTS_HOME, headers=_LRM_HEADERS, timeout=15)
         resp.raise_for_status()
     except requests.RequestException:
+        stored = _db_cache_get("list")   # serve the last-known list if the site is down
+        if stored is not None:
+            return stored
         raise HTTPException(status_code=502, detail="results site unavailable")
     soup = BeautifulSoup(resp.text, "html.parser")
     title = soup.title.string if soup.title and soup.title.string else ""
@@ -746,6 +784,7 @@ def live_sessions():
         sessions.append(sess)
     payload = {"event_name": event_name, "sessions": sessions}
     _SESSIONS_CACHE["list"] = (time.time() + _SESSIONS_LIST_TTL, payload)
+    _db_cache_put("list", payload)
     return payload
 
 
@@ -762,9 +801,16 @@ def live_session_results(race_id: int, p: str = "view_race_result",
     if p not in _SESSION_VIEWS:
         raise HTTPException(status_code=400, detail="unknown results view")
     cache_key = (p, race_id)
+    db_key = f"{p}:{race_id}"
     cached = _sessions_cache_get(cache_key)
     if cached is not None:
         return cached
+    # Pre-stored in the DB (populated by the warmer / earlier taps): a ~50ms read
+    # instead of a 5-15s scrape, and it survives restarts + the site going down.
+    stored = _db_cache_get(db_key)
+    if stored is not None:
+        _SESSIONS_CACHE[cache_key] = (time.time() + _SESSION_RESULT_TTL, stored)
+        return stored
     if p == "view_combined_round_ranking":
         if event_id is None or rt is None:
             raise HTTPException(status_code=400,
@@ -837,6 +883,7 @@ def live_session_results(race_id: int, p: str = "view_race_result",
         })
     payload = {"race_id": race_id, "p": p, "results": rows}
     _SESSIONS_CACHE[cache_key] = (time.time() + _SESSION_RESULT_TTL, payload)
+    _db_cache_put(db_key, payload)
     return payload
 
 

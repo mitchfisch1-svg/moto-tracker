@@ -182,3 +182,13 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS tickets_url TEXT;
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS manufacturer TEXT;
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS hometown TEXT;
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_url TEXT;
+
+-- Durable cache of scraped race-day session results. The API serves the session
+-- browser from here (a ~50ms DB read) instead of re-scraping the results site on
+-- every tap; it also survives server restarts and the results site going down.
+-- Keyed by 'list' (the event's session list) or '{view}:{race_id}' (one session).
+CREATE TABLE IF NOT EXISTS scraped_session_cache (
+    cache_key   TEXT PRIMARY KEY,
+    payload     JSONB NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
