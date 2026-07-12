@@ -60,23 +60,29 @@ def _mark(cur, key, value=None):
     )
 
 
-def _tokens_following(cur, rider_ids):
+def _tokens_following(cur, rider_ids, pref):
+    """Tokens that follow any given rider AND have the `pref` toggle on."""
     ids = [int(r) for r in rider_ids]
     if not ids:
         return []
     cur.execute(
         """
         SELECT DISTINCT token FROM push_tokens
-        WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(rider_ids) e
+        WHERE COALESCE((prefs ->> %s)::boolean, true)
+          AND EXISTS (SELECT 1 FROM jsonb_array_elements(rider_ids) e
                       WHERE (e #>> '{}')::int = ANY(%s))
         """,
-        (ids,),
+        (pref, ids),
     )
     return [r[0] for r in cur.fetchall()]
 
 
-def _all_tokens(cur):
-    cur.execute("SELECT token FROM push_tokens")
+def _all_tokens(cur, pref):
+    """Every token with the `pref` toggle on (for broadcast alerts)."""
+    cur.execute(
+        "SELECT token FROM push_tokens WHERE COALESCE((prefs ->> %s)::boolean, true)",
+        (pref,),
+    )
     return [r[0] for r in cur.fetchall()]
 
 
@@ -104,7 +110,7 @@ def _rider_results(cur):
         key = f"result:{session_id}:{rider_id}"
         if _seen(cur, key):
             continue
-        tokens = _tokens_following(cur, [rider_id])
+        tokens = _tokens_following(cur, [rider_id], 'results')
         if tokens:
             race = (label or "").replace("#", "").strip()
             verb = "won" if pos == 1 else f"finished P{pos} in"
@@ -146,7 +152,7 @@ def _gate_drop(cur):
         except (TypeError, ValueError):
             pass
         send_push(
-            _all_tokens(cur),
+            _all_tokens(cur, 'gate'),
             "🟢 Race starting soon",
             f"{_SERIES_LONG.get(abbrev, abbrev)} {venue} — gate drop in "
             f"~{int(mins)} min{providers}",
@@ -175,7 +181,7 @@ def _championship(cur):
         if row[0] == str(rider_id):
             continue                              # same leader, nothing to say
         send_push(
-            _all_tokens(cur),
+            _all_tokens(cur, 'leader'),
             "👑 New points leader",
             f"{name} now leads the {cls} {_SERIES_LONG.get(abbrev, abbrev)} "
             f"championship.",
@@ -213,7 +219,7 @@ def _rider_news(cur):
         matched = [rid for rid, full in names.items()
                    if len(_last_name(full)) > 2 and _last_name(full).lower() in hay]
         if matched:
-            tokens = _tokens_following(cur, matched)
+            tokens = _tokens_following(cur, matched, 'news')
             if tokens:
                 send_push(tokens, f"📰 {names[matched[0]]}",
                           title or "New story", {"url": url})

@@ -211,3 +211,8 @@ CREATE TABLE IF NOT EXISTS push_sent (
     value    TEXT,
     sent_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Per-device notification preferences (all on by default). Keys mirror the
+-- triggers in src/notify.py: results | gate | leader | news.
+ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS prefs JSONB NOT NULL
+    DEFAULT '{"results": true, "gate": true, "leader": true, "news": true}'::jsonb;

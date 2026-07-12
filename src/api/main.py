@@ -933,35 +933,42 @@ def warm_sessions():
 # --- push notifications ------------------------------------------------------
 # The app registers its device token here (no accounts — the token is the id);
 # the actual sending lives in src/notify.py, driven by the pipeline.
+_DEFAULT_PREFS = {"results": True, "gate": True, "leader": True, "news": True}
+
+
 class PushRegister(BaseModel):
     token: str
     rider_ids: list[int] = []
     platform: str | None = None
+    prefs: dict[str, bool] | None = None   # results | gate | leader | news
 
 
 @app.post("/push/register")
 def push_register(body: PushRegister):
-    """Store/refresh an Expo push token and the riders this device follows.
+    """Store/refresh an Expo push token, the riders this device follows, and
+    which notification types it wants.
 
     The token is the identity — re-registering (e.g. after the user stars a new
-    rider) just updates the follow list. Idempotent on the token.
+    rider or flips a toggle in Settings) just updates the row. Idempotent.
     """
     if not body.token.startswith("ExponentPushToken"):
         raise HTTPException(status_code=400, detail="not an Expo push token")
+    prefs = {**_DEFAULT_PREFS, **(body.prefs or {})}
     with _pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO push_tokens (token, rider_ids, platform, updated_at)
-                VALUES (%s, %s, %s, now())
+                INSERT INTO push_tokens (token, rider_ids, platform, prefs, updated_at)
+                VALUES (%s, %s, %s, %s, now())
                 ON CONFLICT (token) DO UPDATE
                   SET rider_ids  = EXCLUDED.rider_ids,
                       platform   = EXCLUDED.platform,
+                      prefs      = EXCLUDED.prefs,
                       updated_at = now()
                 """,
-                (body.token, Json(body.rider_ids), body.platform),
+                (body.token, Json(body.rider_ids), body.platform, Json(prefs)),
             )
-    return {"ok": True, "following": len(body.rider_ids)}
+    return {"ok": True, "following": len(body.rider_ids), "prefs": prefs}
 
 
 # --- rundown (newcomer "catch me up" on the current field) -------------------
