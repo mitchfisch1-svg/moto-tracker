@@ -348,7 +348,8 @@ def standings(
     year = year or _current_year()
     sql = """
         SELECT st.class, st.position, r.id AS rider_id, r.full_name, r.number,
-               r.team, r.manufacturer, st.points, st.wins, st.podiums
+               r.team, r.manufacturer, r.headshot_url, st.points, st.wins,
+               st.podiums
         FROM standings st
         JOIN seasons se ON se.id = st.season_id
         JOIN series  s  ON s.id  = se.series_id
@@ -969,6 +970,7 @@ def _wmx_standings():
             "number": (cells[1] or "").strip() or None,
             "team": None,
             "manufacturer": None,
+            "headshot_url": None,
             "points": int(cells[pts_i]) if cells[pts_i].lstrip("-").isdigit() else 0,
             "wins": sum(1 for f in finishes if f == "1st"),
             "podiums": sum(1 for f in finishes if f in ("1st", "2nd", "3rd")),
