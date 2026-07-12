@@ -931,12 +931,8 @@ def warm_sessions():
 
 
 # --- push notifications ------------------------------------------------------
-# Expo's push service delivers to iOS via APNs for us — we just POST messages.
-# The app registers its device token (no accounts); triggers (e.g. "your rider
-# podiumed") look up which tokens follow a rider and send_push() to them.
-_EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
-
-
+# The app registers its device token here (no accounts — the token is the id);
+# the actual sending lives in src/notify.py, driven by the pipeline.
 class PushRegister(BaseModel):
     token: str
     rider_ids: list[int] = []
@@ -966,42 +962,6 @@ def push_register(body: PushRegister):
                 (body.token, Json(body.rider_ids), body.platform),
             )
     return {"ok": True, "following": len(body.rider_ids)}
-
-
-def send_push(tokens, title, body, data=None):
-    """Deliver one notification to many Expo tokens (batched ≤100 per request)."""
-    tokens = list(dict.fromkeys(t for t in tokens if t))   # de-dupe, drop blanks
-    if not tokens:
-        return {"sent": 0}
-    sent = 0
-    for i in range(0, len(tokens), 100):
-        batch = tokens[i:i + 100]
-        messages = [{"to": t, "title": title, "body": body,
-                     "sound": "default", "data": data or {}} for t in batch]
-        try:
-            resp = requests.post(_EXPO_PUSH_URL, json=messages, timeout=15)
-            resp.raise_for_status()
-            sent += len(batch)
-        except requests.RequestException:
-            pass   # a bad batch shouldn't sink the rest
-    return {"sent": sent}
-
-
-def tokens_following(rider_ids):
-    """Push tokens that follow any of the given rider ids (for targeted alerts)."""
-    if not rider_ids:
-        return []
-    rows = query(
-        """
-        SELECT DISTINCT token FROM push_tokens
-        WHERE EXISTS (
-            SELECT 1 FROM jsonb_array_elements(rider_ids) e
-            WHERE (e #>> '{}')::int = ANY(%s)
-        )
-        """,
-        (list(int(r) for r in rider_ids),),
-    )
-    return [r["token"] for r in rows]
 
 
 # --- rundown (newcomer "catch me up" on the current field) -------------------

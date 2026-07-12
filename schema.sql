@@ -202,3 +202,12 @@ CREATE TABLE IF NOT EXISTS push_tokens (
     platform    TEXT,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Ledger so each notification fires exactly once. 'key' identifies the event
+-- (e.g. 'result:{session}:{rider}', 'gate:{event}', 'leader:{season}:{class}');
+-- 'value' holds state for stateful triggers (the class's last-notified leader).
+CREATE TABLE IF NOT EXISTS push_sent (
+    key      TEXT PRIMARY KEY,
+    value    TEXT,
+    sent_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

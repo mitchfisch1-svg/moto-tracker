@@ -21,3 +21,10 @@ jobs:
       - run: python -m src.scheduler --job results
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # Fire any due push notifications (results, gate-drop, leader swings, news).
+      # Runs every time (not just when live) so news + gate-drop alerts work; a
+      # failure here shouldn't mask results health.
+      - run: python -m src.scheduler --job notify
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

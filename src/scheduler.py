@@ -25,6 +25,7 @@ from .adapters.news_rss import NewsRSSAdapter
 from .adapters.results_html import ResultsHTMLAdapter
 from .adapters.schedule_smx import ScheduleSMXAdapter
 from .db import get_connection
+from .notify import notify_work
 from .pipeline.run_results import select_events
 from .standings import recompute_standings
 
@@ -124,11 +125,19 @@ def job_results():
         log.exception("results: failed")
 
 
+def job_notify():
+    try:
+        notify_work()
+    except Exception:
+        log.exception("notify: failed")
+
+
 def run_once():
     """Run every job a single time (for testing)."""
     job_schedule()
     job_news()
     job_results()
+    job_notify()
 
 
 def main():
@@ -137,16 +146,15 @@ def main():
         "--once", action="store_true", help="run each job once and exit"
     )
     ap.add_argument(
-        "--job", choices=["schedule", "news", "results"],
+        "--job", choices=["schedule", "news", "results", "notify"],
         help="run a single job once and exit (used by scheduled CI jobs)",
     )
     args = ap.parse_args()
 
     if args.job:
         # CI mode: let exceptions propagate so a broken run shows up red.
-        {"schedule": schedule_work, "news": news_work, "results": results_work}[
-            args.job
-        ]()
+        {"schedule": schedule_work, "news": news_work, "results": results_work,
+         "notify": notify_work}[args.job]()
         return
 
     if args.once:
@@ -160,9 +168,11 @@ def main():
                       id="news", name="news every 20 min")
     scheduler.add_job(job_results, IntervalTrigger(minutes=3),
                       id="results", name="results every 3 min (live only)")
+    scheduler.add_job(job_notify, IntervalTrigger(minutes=5),
+                      id="notify", name="push notifications every 5 min")
 
     log.info("Scheduler started. Jobs: schedule (weekly), news (20m), "
-             "results (3m, live only). Ctrl+C to stop.")
+             "results (3m, live only), notify (5m). Ctrl+C to stop.")
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
