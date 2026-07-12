@@ -1,0 +1,20 @@
+name: warm
+
+# Keep the race-day session caches warm so the first user tap is instant instead
+# of a cold scrape of the results site. The /live/warm endpoint self-gates to the
+# race window, so off-day runs are a cheap no-op (a single DB check, no scraping).
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 min (matches the results-ingest cadence)
+  workflow_dispatch:
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Warm session caches
+        run: |
+          echo "Pinging /live/warm at $(date -u +%H:%M:%SZ)…"
+          curl -sS --max-time 180 \
+            "https://moto-tracker-api.onrender.com/live/warm" | tee warm.json
+          echo

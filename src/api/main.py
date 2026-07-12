@@ -840,6 +840,48 @@ def live_session_results(race_id: int, p: str = "view_race_result",
     return payload
 
 
+@app.get("/live/warm")
+def warm_sessions():
+    """Pre-fetch every current-event session into cache so the first user tap on
+    race day is instant instead of a cold scrape of the results site.
+
+    Self-gating: outside the race window this does nothing but a quick DB check,
+    so a frequent cron ping (see .github/workflows/warm.yml) stays cheap. Inside
+    the window it warms the session list plus every session's finishing order in
+    parallel; already-cached sessions return immediately, so repeated pings only
+    pay for new sessions (or a re-warm after a server restart).
+    """
+    live = query(
+        """
+        SELECT 1 FROM events
+        WHERE start_time_utc IS NOT NULL
+          AND now() >= start_time_utc - interval '6 hours'
+          AND now() <= start_time_utc + interval '9 hours'
+        LIMIT 1
+        """
+    )
+    if not live:
+        return {"live": False, "warmed": 0, "total": 0}
+    data = live_sessions()
+    sess = data.get("sessions", [])
+
+    def _warm(s):
+        try:
+            kwargs = {"p": s.get("p", "view_race_result")}
+            if s.get("event_id"):
+                kwargs["event_id"] = int(s["event_id"])
+                kwargs["rt"] = int(s["rt"])
+            live_session_results(int(s["id"]), **kwargs)
+            return True
+        except Exception:
+            return False
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        warmed = sum(ex.map(_warm, sess))
+    return {"live": True, "event_name": data.get("event_name"),
+            "warmed": warmed, "total": len(sess)}
+
+
 # --- rundown (newcomer "catch me up" on the current field) -------------------
 _SERIES_LONG = {"SX": "Supercross", "MX": "Pro Motocross", "SMX": "SuperMotocross"}
 
