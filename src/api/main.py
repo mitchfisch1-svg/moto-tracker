@@ -343,6 +343,8 @@ def standings(
     klass: str | None = Query(None, alias="class"),
     year: int | None = None,
 ):
+    if (klass or "").upper() == "WMX":
+        return _wmx_standings()
     year = year or _current_year()
     sql = """
         SELECT st.class, st.position, r.id AS rider_id, r.full_name, r.number,
@@ -903,6 +905,80 @@ def live_session_results(race_id: int, p: str = "view_race_result",
     _SESSIONS_CACHE[cache_key] = (time.time() + _SESSION_RESULT_TTL, payload)
     _db_cache_put(db_key, payload)
     return payload
+
+
+# --- WMX (Women's Motocross) standings ----------------------------------------
+# WMX riders never pass through our results pipeline, and the official points
+# table includes adjustments (penalties) that recomputing from raw results
+# would miss — so WMX standings come straight from the series-points page,
+# cached in memory + DB like session results. rider_id is null (no rider pages).
+_WMX_SERIES_URL = (_RESULTS_HOME +
+                   "?p=view_series_points&id=25")   # 2026 WMX Motocross Championship
+_WMX_TTL = 600
+_ROUND_COL_RE = re.compile(r"^\d+:")
+_FINISH_RE = re.compile(r"^\d+(st|nd|rd|th)$", re.I)
+
+
+def _wmx_standings():
+    cached = _sessions_cache_get("wmx")
+    if cached is not None:
+        return cached
+    try:
+        resp = requests.get(_WMX_SERIES_URL, headers=_LRM_HEADERS, timeout=20)
+        resp.raise_for_status()
+    except requests.RequestException:
+        stored = _db_cache_get("wmx:standings")
+        if stored is not None:
+            return stored
+        raise HTTPException(status_code=502, detail="results site unavailable")
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    table = header = None
+    for tb in soup.find_all("table"):
+        first = tb.find("tr")
+        if not first:
+            continue
+        cells = [c.get_text(" ", strip=True).upper()
+                 for c in first.find_all(["th", "td"])]
+        if "RIDER" in cells and "POINTS" in cells:
+            table, header = tb, cells
+            break
+    if table is None:
+        raise HTTPException(status_code=404, detail="WMX standings not posted yet")
+
+    pts_i = header.index("POINTS")
+    round_idx = [i for i, h in enumerate(header) if _ROUND_COL_RE.match(h)]
+    rows = []
+    for tr in table.find_all("tr"):
+        cells = [c.get_text(" ", strip=True)
+                 for c in tr.find_all(["th", "td"], recursive=False)]
+        if len(cells) <= pts_i or not (cells[0] or "").isdigit():
+            continue
+        # Each round cell reads "<round pts> <overall finish> <moto lines…>";
+        # the second token is the round-overall finish ("1st", "2nd", …).
+        finishes = []
+        for i in round_idx:
+            toks = (cells[i] or "").split() if i < len(cells) else []
+            if len(toks) >= 2 and _FINISH_RE.match(toks[1]):
+                finishes.append(toks[1].lower())
+        rows.append({
+            "class": "WMX",
+            "position": int(cells[0]),
+            "rider_id": None,
+            "full_name": (cells[3] or "").strip(),
+            "number": (cells[1] or "").strip() or None,
+            "team": None,
+            "manufacturer": None,
+            "points": int(cells[pts_i]) if cells[pts_i].lstrip("-").isdigit() else 0,
+            "wins": sum(1 for f in finishes if f == "1st"),
+            "podiums": sum(1 for f in finishes if f in ("1st", "2nd", "3rd")),
+        })
+    leader = rows[0]["points"] if rows else 0
+    for r in rows:
+        r["gap"] = leader - r["points"]
+    _SESSIONS_CACHE["wmx"] = (time.time() + _WMX_TTL, rows)
+    _db_cache_put("wmx:standings", rows)
+    return rows
 
 
 @app.get("/live/warm")
