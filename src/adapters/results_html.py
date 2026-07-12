@@ -27,7 +27,10 @@ BASE = "https://results.supermotocross.com/results/"
 
 # Classes we score, and the session types we pull for points.
 # 'tc_race' = one race of a Supercross Triple Crown (combined into an overall).
-SCORING_CLASSES = {"450", "250"}
+# WMX motos are ingested for rider identities/results, but WMX standings are
+# served from the official series-points page (it carries penalty adjustments)
+# — recompute_standings skips the class.
+SCORING_CLASSES = {"450", "250", "WMX"}
 POINTS_TYPES = {"main", "moto", "tc_race"}
 
 _RESULT_HEADER = ["POS", "#", "BIKE", "RIDER"]

@@ -61,18 +61,28 @@ def _mark(cur, key, value=None):
 
 
 def _tokens_following(cur, rider_ids, pref):
-    """Tokens that follow any given rider AND have the `pref` toggle on."""
+    """Tokens that follow any given rider and want `pref` alerts for them.
+
+    Per-rider overrides (rider_prefs["41"]["news"] = false) win over the
+    device's global toggle; a missing override falls back to the global pref,
+    and a missing global pref defaults on.
+    """
     ids = [int(r) for r in rider_ids]
     if not ids:
         return []
     cur.execute(
         """
         SELECT DISTINCT token FROM push_tokens
-        WHERE COALESCE((prefs ->> %s)::boolean, true)
-          AND EXISTS (SELECT 1 FROM jsonb_array_elements(rider_ids) e
-                      WHERE (e #>> '{}')::int = ANY(%s))
+        WHERE EXISTS (
+            SELECT 1 FROM jsonb_array_elements(rider_ids) e
+            WHERE (e #>> '{}')::int = ANY(%s)
+              AND COALESCE(
+                    (rider_prefs -> (e #>> '{}') ->> %s)::boolean,
+                    (prefs ->> %s)::boolean,
+                    true)
+        )
         """,
-        (pref, ids),
+        (ids, pref, pref),
     )
     return [r[0] for r in cur.fetchall()]
 

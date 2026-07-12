@@ -978,6 +978,31 @@ def _wmx_standings():
     leader = rows[0]["points"] if rows else 0
     for r in rows:
         r["gap"] = leader - r["points"]
+
+    # Enrich with rider identities from our pipeline (WMX motos are ingested),
+    # so matched rows get tap-through rider pages, team/manufacturer, and
+    # headshots if Feld ever publishes WMX media. Unmatched rows stay display-only.
+    names = [r["full_name"].lower() for r in rows if r["full_name"]]
+    if names:
+        try:
+            matches = query(
+                """
+                SELECT id, full_name, team, manufacturer, headshot_url
+                FROM riders WHERE lower(full_name) = ANY(%s)
+                """,
+                (names,),
+            )
+            by_name = {m["full_name"].lower(): m for m in matches}
+            for r in rows:
+                m = by_name.get((r["full_name"] or "").lower())
+                if m:
+                    r["rider_id"] = m["id"]
+                    r["team"] = m["team"]
+                    r["manufacturer"] = m["manufacturer"]
+                    r["headshot_url"] = m["headshot_url"]
+        except Exception:
+            pass   # enrichment is best-effort; official points still serve
+
     _SESSIONS_CACHE["wmx"] = (time.time() + _WMX_TTL, rows)
     _db_cache_put("wmx:standings", rows)
     return rows
@@ -1036,6 +1061,9 @@ class PushRegister(BaseModel):
     rider_ids: list[int] = []
     platform: str | None = None
     prefs: dict[str, bool] | None = None   # results | gate | leader | news
+    # Per-rider overrides for rider-scoped alerts, keyed by rider id:
+    # {"41": {"results": true, "news": false}}. Missing → global prefs apply.
+    rider_prefs: dict[str, dict[str, bool]] | None = None
 
 
 @app.post("/push/register")
@@ -1053,15 +1081,18 @@ def push_register(body: PushRegister):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO push_tokens (token, rider_ids, platform, prefs, updated_at)
-                VALUES (%s, %s, %s, %s, now())
+                INSERT INTO push_tokens
+                    (token, rider_ids, platform, prefs, rider_prefs, updated_at)
+                VALUES (%s, %s, %s, %s, %s, now())
                 ON CONFLICT (token) DO UPDATE
-                  SET rider_ids  = EXCLUDED.rider_ids,
-                      platform   = EXCLUDED.platform,
-                      prefs      = EXCLUDED.prefs,
-                      updated_at = now()
+                  SET rider_ids   = EXCLUDED.rider_ids,
+                      platform    = EXCLUDED.platform,
+                      prefs       = EXCLUDED.prefs,
+                      rider_prefs = EXCLUDED.rider_prefs,
+                      updated_at  = now()
                 """,
-                (body.token, Json(body.rider_ids), body.platform, Json(prefs)),
+                (body.token, Json(body.rider_ids), body.platform, Json(prefs),
+                 Json(body.rider_prefs or {})),
             )
     return {"ok": True, "following": len(body.rider_ids), "prefs": prefs}
 

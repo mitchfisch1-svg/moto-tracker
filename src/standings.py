@@ -67,6 +67,9 @@ def recompute_standings(conn, season_id: int | None = None) -> int:
             WHERE sess.type = ANY(%s)
               AND r.rider_id IS NOT NULL
               AND r.points IS NOT NULL
+              -- WMX standings come from the official series-points page (which
+              -- includes penalty adjustments); recomputing here would disagree.
+              AND sess.class <> 'WMX'
               {where_season}
             """,
             (list(SCORING_TYPES), *params),

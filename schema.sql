@@ -216,3 +216,8 @@ CREATE TABLE IF NOT EXISTS push_sent (
 -- triggers in src/notify.py: results | gate | leader | news.
 ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS prefs JSONB NOT NULL
     DEFAULT '{"results": true, "gate": true, "leader": true, "news": true}'::jsonb;
+-- Per-rider overrides for the rider-scoped alert types, keyed by rider id:
+-- {"41": {"results": true, "news": false}, ...}. Missing rider/key falls back
+-- to the device's global prefs above.
+ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS rider_prefs JSONB NOT NULL
+    DEFAULT '{}'::jsonb;
