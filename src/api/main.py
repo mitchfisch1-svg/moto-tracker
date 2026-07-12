@@ -644,6 +644,13 @@ _RESULTS_HOME = "https://results.supermotocross.com/results/"
 _RESULT_HEADER = ["POS", "#", "BIKE", "RIDER"]
 _POS_RE = re.compile(r"^(\d+|DNF|DNS|DSQ|DNQ)$", re.I)
 _RACE_LINK_RE = re.compile(r"view_race_result&(?:amp;)?id=(\d+)")
+_OVERALL_LINK_RE = re.compile(r"view_multi_main_result&(?:amp;)?id=(\d+)")
+_COMBQUAL_LINK_RE = re.compile(
+    r"view_combined_round_ranking&(?:amp;)?id=(\d+)&(?:amp;)?rt=(\d+)"
+    r"&(?:amp;)?class_id=(\d+)")
+# Results views the session browser may request (guards the upstream URL).
+_SESSION_VIEWS = {"view_race_result", "view_multi_main_result",
+                  "view_combined_round_ranking"}
 
 # Bike makes recognized inside team names (kept in sync with results_html.py).
 _MAKES = ["KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS",
@@ -667,6 +674,10 @@ def _sessions_cache_get(key):
 def _session_kind(label: str) -> str:
     """Classify a session by its label so the app can group and explain it."""
     low = (label or "").lower()
+    if "overall" in low:
+        return "overall"        # motos combined — the result that sets the podium
+    if "combined" in low and ("qual" in low or "practice" in low):
+        return "combined"       # merged A+B group qualifying times
     if "lcq" in low or "last chance" in low:
         return "lcq"
     if "qual" in low or "practice" in low:
@@ -709,29 +720,58 @@ def live_sessions():
     event_name = title.split("::")[-1].strip() if "::" in title else title.strip()
 
     seen, sessions = set(), []
-    for a in soup.find_all("a", href=_RACE_LINK_RE):
+    for a in soup.find_all("a", href=True):
         href = a.get("href", "")
         if "export=pdf" in href:
             continue
-        rid = _RACE_LINK_RE.search(href).group(1)
-        if rid in seen:
+        # Each session links to one of three results views. Overall (motos
+        # combined) and Combined Qualifying carry extra params we preserve.
+        m = _RACE_LINK_RE.search(href)
+        if m:
+            sess = {"id": m.group(1), "p": "view_race_result"}
+        elif (g := _OVERALL_LINK_RE.search(href)):
+            sess = {"id": g.group(1), "p": "view_multi_main_result"}
+        elif (g := _COMBQUAL_LINK_RE.search(href)):
+            # The URL's id is the event; class_id identifies the class.
+            sess = {"id": g.group(3), "p": "view_combined_round_ranking",
+                    "event_id": g.group(1), "rt": g.group(2)}
+        else:
             continue
-        seen.add(rid)
+        key = (sess["p"], sess["id"])
+        if key in seen:
+            continue
+        seen.add(key)
         label = a.get_text(" ", strip=True)
-        sessions.append({"id": rid, "label": label,
-                         "kind": _session_kind(label), "status": "complete"})
+        sess.update(label=label, kind=_session_kind(label), status="complete")
+        sessions.append(sess)
     payload = {"event_name": event_name, "sessions": sessions}
     _SESSIONS_CACHE["list"] = (time.time() + _SESSIONS_LIST_TTL, payload)
     return payload
 
 
 @app.get("/live/sessions/{race_id}")
-def live_session_results(race_id: int):
-    """Finishing order for one session, parsed from its results page."""
-    cached = _sessions_cache_get(race_id)
+def live_session_results(race_id: int, p: str = "view_race_result",
+                         event_id: int | None = None, rt: int | None = None):
+    """Finishing order for one session, parsed from its results page.
+
+    ``p`` selects the view: ``view_race_result`` (a single moto/qualifying
+    session), ``view_multi_main_result`` (the round Overall — motos combined),
+    or ``view_combined_round_ranking`` (Combined Qualifying, which also needs
+    ``event_id`` + ``rt``, with ``race_id`` carrying the class_id).
+    """
+    if p not in _SESSION_VIEWS:
+        raise HTTPException(status_code=400, detail="unknown results view")
+    cache_key = (p, race_id)
+    cached = _sessions_cache_get(cache_key)
     if cached is not None:
         return cached
-    url = f"{_RESULTS_HOME}?p=view_race_result&id={race_id}"
+    if p == "view_combined_round_ranking":
+        if event_id is None or rt is None:
+            raise HTTPException(status_code=400,
+                                detail="combined ranking needs event_id and rt")
+        url = f"{_RESULTS_HOME}?p={p}&id={event_id}&rt={rt}&class_id={race_id}"
+    else:
+        url = f"{_RESULTS_HOME}?p={p}&id={race_id}"
     try:
         resp = requests.get(url, headers=_LRM_HEADERS, timeout=20)
         resp.raise_for_status()
@@ -751,30 +791,52 @@ def live_session_results(race_id: int):
     if table is None:
         raise HTTPException(status_code=404, detail="results not posted yet")
 
+    # Column layout varies by view: after POS/#/BIKE/RIDER come 1-3 stat columns
+    # (best lap, gap; or moto1/moto2/total), optionally trailed by HOMETOWN/TEAM.
+    up = [h.upper() for h in header]
+    team_idx = up.index("TEAM") if "TEAM" in up else None
+    home_idx = up.index("HOMETOWN") if "HOMETOWN" in up else None
+    stat_end = min(i for i in (team_idx, home_idx, len(header)) if i is not None)
+    is_overall = "MOTO 1" in up and "MOTO 2" in up
+
     rows = []
     for tr in table.find_all("tr"):
         cells = [c.get_text(" ", strip=True)
                  for c in tr.find_all(["th", "td"], recursive=False)]
-        if len(cells) < 9 or not _POS_RE.match(cells[0] or ""):
+        if len(cells) < 5 or not _POS_RE.match(cells[0] or ""):
             continue
-        team = (cells[8] or "").strip() or None
+        team = ((cells[team_idx].strip() or None)
+                if team_idx is not None and team_idx < len(cells) else None)
         name = re.sub(r"\s+HOLESHOT$", "", cells[3] or "", flags=re.I).strip()
+        if is_overall:
+            # Show the moto scores (e.g. "1-1") plus the round point total.
+            m1 = cells[4] if len(cells) > 4 else ""
+            m2 = cells[5] if len(cells) > 5 else ""
+            total = cells[6] if len(cells) > 6 else ""
+            primary_label, primary = "MOTOS", (f"{m1}-{m2}" if m1 or m2 else None)
+            secondary_label, secondary = "", (f"{total} pts" if total else None)
+        else:
+            # Pass the site's own column labels through with the values.
+            primary_label = header[4] if len(header) > 4 else ""
+            primary = (cells[4].strip() or None) if len(cells) > 4 else None
+            has_sec = 5 < stat_end   # col 5 is a stat, not hometown/team
+            secondary_label = header[5] if (has_sec and len(header) > 5) else ""
+            secondary = ((cells[5].strip() or None)
+                         if has_sec and len(cells) > 5 else None)
         rows.append({
             "position": int(cells[0]) if cells[0].isdigit() else None,
             "status": "finished" if cells[0].isdigit() else cells[0].lower(),
             "number": (cells[1] or "").strip() or None,
             "name": name.title(),
-            # Column semantics vary by session type (qualifying vs moto), so
-            # pass the site's own column labels through with the values.
-            "primary_label": header[4] if len(header) > 4 else "",
-            "primary": (cells[4] or "").strip() or None,
-            "secondary_label": header[5] if len(header) > 5 else "",
-            "secondary": (cells[5] or "").strip() or None,
+            "primary_label": primary_label,
+            "primary": primary,
+            "secondary_label": secondary_label,
+            "secondary": secondary,
             "team": team,
             "manufacturer": _make_from_team(team),
         })
-    payload = {"race_id": race_id, "results": rows}
-    _SESSIONS_CACHE[race_id] = (time.time() + _SESSION_RESULT_TTL, payload)
+    payload = {"race_id": race_id, "p": p, "results": rows}
+    _SESSIONS_CACHE[cache_key] = (time.time() + _SESSION_RESULT_TTL, payload)
     return payload
 
 
