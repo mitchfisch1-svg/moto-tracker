@@ -21,6 +21,7 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
@@ -927,6 +928,80 @@ def warm_sessions():
         warmed = sum(ex.map(_warm, sess))
     return {"live": True, "event_name": data.get("event_name"),
             "warmed": warmed, "total": len(sess)}
+
+
+# --- push notifications ------------------------------------------------------
+# Expo's push service delivers to iOS via APNs for us — we just POST messages.
+# The app registers its device token (no accounts); triggers (e.g. "your rider
+# podiumed") look up which tokens follow a rider and send_push() to them.
+_EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+
+
+class PushRegister(BaseModel):
+    token: str
+    rider_ids: list[int] = []
+    platform: str | None = None
+
+
+@app.post("/push/register")
+def push_register(body: PushRegister):
+    """Store/refresh an Expo push token and the riders this device follows.
+
+    The token is the identity — re-registering (e.g. after the user stars a new
+    rider) just updates the follow list. Idempotent on the token.
+    """
+    if not body.token.startswith("ExponentPushToken"):
+        raise HTTPException(status_code=400, detail="not an Expo push token")
+    with _pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO push_tokens (token, rider_ids, platform, updated_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (token) DO UPDATE
+                  SET rider_ids  = EXCLUDED.rider_ids,
+                      platform   = EXCLUDED.platform,
+                      updated_at = now()
+                """,
+                (body.token, Json(body.rider_ids), body.platform),
+            )
+    return {"ok": True, "following": len(body.rider_ids)}
+
+
+def send_push(tokens, title, body, data=None):
+    """Deliver one notification to many Expo tokens (batched ≤100 per request)."""
+    tokens = list(dict.fromkeys(t for t in tokens if t))   # de-dupe, drop blanks
+    if not tokens:
+        return {"sent": 0}
+    sent = 0
+    for i in range(0, len(tokens), 100):
+        batch = tokens[i:i + 100]
+        messages = [{"to": t, "title": title, "body": body,
+                     "sound": "default", "data": data or {}} for t in batch]
+        try:
+            resp = requests.post(_EXPO_PUSH_URL, json=messages, timeout=15)
+            resp.raise_for_status()
+            sent += len(batch)
+        except requests.RequestException:
+            pass   # a bad batch shouldn't sink the rest
+    return {"sent": sent}
+
+
+def tokens_following(rider_ids):
+    """Push tokens that follow any of the given rider ids (for targeted alerts)."""
+    if not rider_ids:
+        return []
+    rows = query(
+        """
+        SELECT DISTINCT token FROM push_tokens
+        WHERE EXISTS (
+            SELECT 1 FROM jsonb_array_elements(rider_ids) e
+            WHERE (e #>> '{}')::int = ANY(%s)
+        )
+        """,
+        (list(int(r) for r in rider_ids),),
+    )
+    return [r["token"] for r in rows]
 
 
 # --- rundown (newcomer "catch me up" on the current field) -------------------

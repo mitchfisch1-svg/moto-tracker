@@ -192,3 +192,13 @@ CREATE TABLE IF NOT EXISTS scraped_session_cache (
     payload     JSONB NOT NULL,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Expo push-notification device tokens. No accounts — the token is the identity.
+-- rider_ids holds the riders that device follows, so we can target "your rider"
+-- alerts to just the people who care.
+CREATE TABLE IF NOT EXISTS push_tokens (
+    token       TEXT PRIMARY KEY,
+    rider_ids   JSONB NOT NULL DEFAULT '[]'::jsonb,
+    platform    TEXT,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
