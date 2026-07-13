@@ -71,11 +71,16 @@ def classify(label: str):
         cls = "WMX"
     elif "SMX NEXT" in up:
         cls = "SMX Next"
+    elif "250" in up and "SHOWDOWN" in up:
+        # Sponsor-prefixed finale, e.g. "Dave Coombs Sr. 250 East West Showdown"
+        cls = "250"
     else:
         cls = None
 
     if "MAIN" in up:
         typ = "main"
+    elif "SHOWDOWN" in up:
+        typ = "main"   # the East/West Showdown is that night's 250 main event
     elif "MOTO" in up:
         typ = "moto"
     elif "LCQ" in up:
