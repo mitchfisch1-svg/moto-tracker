@@ -588,6 +588,9 @@ def news_top(limit: int = Query(3, le=6)):
         seen_titles.add(key)
         summary = re.sub(r"<[^>]+>", "", a["summary"] or "")
         summary = re.sub(r"\s+", " ", summary).strip()
+        # RSS boilerplate ("The post X appeared first on Y.") isn't a summary.
+        if re.match(r"^The post .{0,140}appeared first on", summary):
+            summary = ""
         out.append({
             "title": a["title"],
             "summary": summary[:280] + ("…" if len(summary) > 280 else ""),
