@@ -633,7 +633,10 @@ def live(demo: bool = False):
         JOIN seasons se ON se.id = e.season_id
         JOIN series  s  ON s.id  = se.series_id
         WHERE e.start_time_utc IS NOT NULL
-          AND now() >= e.start_time_utc - interval '4 hours'
+          -- DRY RUN (temporary): widened from '4 hours' so the next event
+          -- counts as live now, to test the Live Activity chain end-to-end.
+          -- REVERT to interval '4 hours' after the test.
+          AND now() >= e.start_time_utc - interval '7 days'
           AND now() <= e.start_time_utc + interval '6 hours'
         ORDER BY e.start_time_utc
         LIMIT 1
