@@ -472,8 +472,25 @@ def manufacturer_standings(series: str, year: int | None = None):
     """Manufacturers championship, official style: in each points-scoring
     session, a make scores its best finisher's points."""
     year = year or _current_year()
+    labels = {"450": "450 — Men", "250": "250 — Men", "WMX": "WMX — Women"}
     out = []
-    for cls in ("450", "250"):
+    for cls in ("450", "250", "WMX"):
+        # A makes championship is only honest if most of the field's bikes are
+        # known. WMX bikes aren't in any results data — they backfill from the
+        # live feed during WMX rounds — so the section appears once coverage
+        # is real instead of showing standings built from 6 known bikes.
+        if cls == "WMX":
+            n = query(
+                """
+                SELECT COUNT(DISTINCT ri.id) AS c
+                FROM riders ri
+                JOIN results r ON r.rider_id = ri.id
+                JOIN sessions s ON s.id = r.session_id
+                WHERE s.class = 'WMX' AND ri.manufacturer IS NOT NULL
+                """
+            )[0]["c"]
+            if n < 12:
+                continue
         rows = query(
             """
             SELECT make AS manufacturer,
@@ -500,7 +517,7 @@ def manufacturer_standings(series: str, year: int | None = None):
         )
         for i, r in enumerate(rows, start=1):
             r["position"] = i
-        out.append({"class": cls, "rows": rows})
+        out.append({"class": cls, "label": labels.get(cls, cls), "rows": rows})
     return out
 
 
@@ -721,6 +738,39 @@ def _lrm_json(lrm_id: str, name: str):
         return None
 
 
+# The live feed is the ONLY source that knows every rider's bike (the results
+# site's BIKE/BRAND columns are empty everywhere) — so while a race runs,
+# permanently capture manufacturers for riders our team-name parsing missed.
+# Per-process seen-set keeps this to one DB write per rider per deploy.
+_MAKE_BACKFILL_SEEN: set = set()
+
+
+def _backfill_manufacturers(riders):
+    pairs = []
+    for r in riders:
+        name, make_raw = r.get("name"), r.get("manufacturer")
+        if not name or not make_raw or name.lower() in _MAKE_BACKFILL_SEEN:
+            continue
+        make = _make_from_team(make_raw)   # normalizes GASGAS/GAS GAS etc.
+        if make:
+            pairs.append((name, make))
+    if not pairs:
+        return
+    try:
+        with _pool.connection() as conn:
+            with conn.cursor() as cur:
+                for name, make in pairs:
+                    cur.execute(
+                        "UPDATE riders SET manufacturer = %s "
+                        "WHERE lower(full_name) = lower(%s) "
+                        "  AND manufacturer IS NULL",
+                        (make, name),
+                    )
+                    _MAKE_BACKFILL_SEEN.add(name.lower())
+    except Exception:
+        pass   # enrichment only — never disturb the live payload
+
+
 def _rider_status(r: dict) -> str:
     if r.get("IsDisqualified"):
         return "dsq"
@@ -832,6 +882,8 @@ def live(demo: bool = False):
         }
         for r in sorted(riders_raw, key=lambda x: x.get("Position") or 999)
     ]
+
+    _backfill_manufacturers(riders)
 
     # Race control feed, newest first ("Green Flag", "#96 ... holeshot", …).
     announcements = [
