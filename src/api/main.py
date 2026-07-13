@@ -50,10 +50,11 @@ def _notify_loop():
 
 
 # Live Activity loop: while a race window is open, push the running order to
-# every registered lock-screen activity every ~15s (Apple budgets frequent
-# updates for the liveactivity push type). No-ops without APNs credentials
-# or registered tokens, so it costs one cheap DB check per tick off-race.
-_LA_INTERVAL_S = 15
+# every registered lock-screen activity every ~10s. That's the practical
+# floor: the timing feed itself refreshes ~every 5-10s, and sustained faster
+# pushes risk Apple's frequent-update budget deferring deliveries (which
+# looks jerkier, not smoother). No-ops without APNs credentials or tokens.
+_LA_INTERVAL_S = 10
 
 
 def _la_content_state(payload):
@@ -119,6 +120,24 @@ def _live_activity_loop():
                                 conn.execute(
                                     "DELETE FROM live_activity_tokens "
                                     "WHERE token = ANY(%s)", (stale,))
+                    elif not payload.get("live"):
+                        # Race window closed: end every activity immediately so
+                        # nothing lingers on lock screens/Dynamic Island, and
+                        # forget the tokens (fresh ones register next race day).
+                        upd = [r["token"] for r in rows if r["kind"] == "update"]
+                        if upd:
+                            with httpx.Client(http2=True, timeout=15) as client:
+                                for t in upd:
+                                    send_live_activity(
+                                        t, "end",
+                                        {"race": "Session complete", "venue": None,
+                                         "riders": [], "flag": None,
+                                         "remaining": None},
+                                        client=client)
+                            with _pool.connection() as conn:
+                                conn.execute(
+                                    "DELETE FROM live_activity_tokens "
+                                    "WHERE token = ANY(%s)", (upd,))
         except Exception:
             pass   # next tick retries
         time.sleep(_LA_INTERVAL_S)

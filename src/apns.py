@@ -77,6 +77,10 @@ def send_live_activity(token: str, event: str, content_state: dict,
             "content-state": content_state,
         }
     }
+    if event == "end":
+        # Remove from the lock screen immediately instead of Apple's default
+        # of leaving the final state visible for up to 4 hours.
+        payload["aps"]["dismissal-date"] = int(time.time())
     if event == "start":
         payload["aps"]["attributes-type"] = "MXTRaceAttributes"
         payload["aps"]["attributes"] = {}
