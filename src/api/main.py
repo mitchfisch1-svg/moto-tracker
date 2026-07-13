@@ -239,7 +239,7 @@ def health():
         query("SELECT 1")
     except Exception:
         raise HTTPException(status_code=503, detail="database unavailable")
-    return {"status": "ok", "db": True}
+    return {"status": "ok", "db": True, "apns": apns_ready()}
 
 
 # --- race-day weather (open-meteo, free, no key) -----------------------------
