@@ -86,8 +86,22 @@ def _live_activity_loop():
                     if payload.get("live") and payload.get("timing"):
                         state = _la_content_state(payload)
                         stale = []
+                        # Once per event: remotely launch the activity on every
+                        # phone that registered a push-to-start token (iOS 17.2+)
+                        # — lock screens light up without the app being opened.
+                        ev_id = (payload.get("event") or {}).get("event_id")
+                        start_key = f"lastart:{ev_id}" if ev_id else None
+                        started = True
+                        if start_key:
+                            with _pool.connection() as conn:
+                                started = conn.execute(
+                                    "SELECT 1 FROM push_sent WHERE key = %s",
+                                    (start_key,)).fetchone() is not None
                         with httpx.Client(http2=True, timeout=15) as client:
                             for row in rows:
+                                if row["kind"] == "start" and not started:
+                                    send_live_activity(
+                                        row["token"], "start", state, client=client)
                                 if row["kind"] != "update":
                                     continue
                                 ok, reason = send_live_activity(
@@ -95,6 +109,11 @@ def _live_activity_loop():
                                 if reason in ("BadDeviceToken", "Unregistered",
                                               "ExpiredToken"):
                                     stale.append(row["token"])
+                        if start_key and not started:
+                            with _pool.connection() as conn:
+                                conn.execute(
+                                    "INSERT INTO push_sent (key) VALUES (%s) "
+                                    "ON CONFLICT (key) DO NOTHING", (start_key,))
                         if stale:
                             with _pool.connection() as conn:
                                 conn.execute(
