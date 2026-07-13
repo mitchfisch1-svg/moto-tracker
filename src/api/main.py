@@ -64,12 +64,14 @@ def _la_content_state(payload):
         for r in (t.get("riders") or [])[:5]
     ]
     clock = t.get("clock") or {}
+    remaining = clock.get("remaining")
     return {
         "race": (t.get("race_name") or "On track")[:40],
         "venue": ((payload.get("event") or {}).get("venue") or "")[:28],
         "riders": riders,
         "flag": (clock.get("flag") or "")[:12],
-        "remaining": clock.get("remaining"),
+        # The widget decodes Int? — LRM sometimes sends fractional seconds.
+        "remaining": int(remaining) if isinstance(remaining, (int, float)) else None,
     }
 
 
