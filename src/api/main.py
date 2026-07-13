@@ -716,14 +716,16 @@ def live(demo: bool = False):
     if not lrm_id:
         return {"live": True, "demo": is_demo, "event": ev, "timing": None}
 
-    # Fetch the three feed files in parallel — keeps the live view snappy.
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    # Fetch the feed files in parallel — keeps the live view snappy.
+    with ThreadPoolExecutor(max_workers=4) as ex:
         f_race = ex.submit(_lrm_json, lrm_id, "race")
         f_riders = ex.submit(_lrm_json, lrm_id, "riders")
         f_clock = ex.submit(_lrm_json, lrm_id, "clock")
+        f_ann = ex.submit(_lrm_json, lrm_id, "announcements")
         race = f_race.result()
         riders_raw = f_riders.result() or []
         clock = f_clock.result()
+        ann_raw = f_ann.result() or []
 
     riders = [
         {
@@ -737,8 +739,17 @@ def live(demo: bool = False):
             "manufacturer": r.get("Manufacturer"),
             "team": r.get("TeamName"),
             "status": _rider_status(r),
+            "position_change": r.get("PositionChangeSinceLastLap"),
+            "fastest_overall": bool(r.get("IsFastestLapBestOverall")),
         }
         for r in sorted(riders_raw, key=lambda x: x.get("Position") or 999)
+    ]
+
+    # Race control feed, newest first ("Green Flag", "#96 ... holeshot", …).
+    announcements = [
+        {"t": a.get("DateTimeLocalDisplay"),
+         "m": (a.get("Message") or "").split(" at: ")[0]}
+        for a in ann_raw[-4:][::-1]
     ]
 
     timing = {
@@ -752,6 +763,7 @@ def live(demo: bool = False):
             "flag": (clock or {}).get("FlagType"),
         },
         "riders": riders,
+        "announcements": announcements,
     }
     return {"live": True, "demo": is_demo, "event": ev, "timing": timing}
 
@@ -767,6 +779,10 @@ _OVERALL_LINK_RE = re.compile(r"view_multi_main_result&(?:amp;)?id=(\d+)")
 _COMBQUAL_LINK_RE = re.compile(
     r"view_combined_round_ranking&(?:amp;)?id=(\d+)&(?:amp;)?rt=(\d+)"
     r"&(?:amp;)?class_id=(\d+)")
+_ENTRY_LINK_RE = re.compile(
+    r"view_entry_list&(?:amp;)?id=(\d+)&(?:amp;)?class_id=(\d+)")
+_TRACK_MAP_RE = re.compile(
+    r"https://assets\.liveracemedia\.com/event_files/[^\"']*Map[^\"']*\.(?:jpg|jpeg|png)")
 # Results views the session browser may request (guards the upstream URL).
 _SESSION_VIEWS = {"view_race_result", "view_multi_main_result",
                   "view_combined_round_ranking"}
@@ -900,7 +916,27 @@ def live_sessions():
         label = a.get_text(" ", strip=True)
         sess.update(label=label, kind=_session_kind(label), status="complete")
         sessions.append(sess)
-    payload = {"event_name": event_name, "sessions": sessions}
+
+    # Track maps (LRM-hosted per-round images) + per-class entry lists.
+    maps = _TRACK_MAP_RE.findall(resp.text)
+    track_map = {
+        "2d": next((m for m in maps if "2D" in m), None),
+        "3d": next((m for m in maps if "3D" in m), None),
+    }
+    entry_seen, entry_lists = set(), []
+    for a in soup.find_all("a", href=_ENTRY_LINK_RE):
+        href = a.get("href", "")
+        if "export=pdf" in href:
+            continue
+        g = _ENTRY_LINK_RE.search(href)
+        if g.group(2) in entry_seen:
+            continue
+        entry_seen.add(g.group(2))
+        entry_lists.append({"event_id": g.group(1), "class_id": g.group(2),
+                            "label": a.get_text(" ", strip=True)})
+
+    payload = {"event_name": event_name, "sessions": sessions,
+               "track_map": track_map, "entry_lists": entry_lists}
     _SESSIONS_CACHE["list"] = (time.time() + _SESSIONS_LIST_TTL, payload)
     _db_cache_put("list", payload)
     return payload
@@ -1103,6 +1139,49 @@ def _wmx_standings():
     _SESSIONS_CACHE["wmx"] = (time.time() + _WMX_TTL, rows)
     _db_cache_put("wmx:standings", rows)
     return rows
+
+
+@app.get("/live/entries/{event_id}/{class_id}")
+def live_entries(event_id: int, class_id: int):
+    """Entry list for one class of the current event — who's racing today."""
+    db_key = f"entries:{event_id}:{class_id}"
+    cached = _sessions_cache_get(db_key)
+    if cached is not None:
+        return cached
+    url = f"{_RESULTS_HOME}?p=view_entry_list&id={event_id}&class_id={class_id}"
+    try:
+        resp = requests.get(url, headers=_LRM_HEADERS, timeout=20)
+        resp.raise_for_status()
+    except requests.RequestException:
+        stored = _db_cache_get(db_key)
+        if stored is not None:
+            return stored
+        raise HTTPException(status_code=502, detail="results site unavailable")
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    # Layout: a title row, then '# | BRAND | RIDER | HOMETOWN | TEAM' rows.
+    rows = []
+    for tb in soup.find_all("table"):
+        for tr in tb.find_all("tr"):
+            cells = [c.get_text(" ", strip=True)
+                     for c in tr.find_all(["th", "td"], recursive=False)]
+            if len(cells) < 5 or not (cells[0] or "").isdigit():
+                continue
+            team = (cells[4] or "").strip() or None
+            rows.append({
+                "number": cells[0],
+                "name": (cells[2] or "").title(),
+                "hometown": (cells[3] or "").strip() or None,
+                "team": team,
+                "manufacturer": _make_from_team(team),
+            })
+        if rows:
+            break
+    payload = {"event_id": event_id, "class_id": class_id, "entries": rows}
+    # Entry lists firm up through the week — cache for an hour.
+    _SESSIONS_CACHE[db_key] = (time.time() + 3600, payload)
+    _db_cache_put(db_key, payload)
+    return payload
 
 
 @app.get("/live/warm")
