@@ -822,6 +822,13 @@ def live(demo: bool = False):
             "status": _rider_status(r),
             "position_change": r.get("PositionChangeSinceLastLap"),
             "fastest_overall": bool(r.get("IsFastestLapBestOverall")),
+            # Latest-lap sector times: pb = personal best, fast = fastest overall.
+            "sectors": [
+                {"n": sct.get("SectorNumber"), "t": sct.get("SectorTimeSeconds"),
+                 "pb": bool(sct.get("IsFastestSectorNumber")),
+                 "fast": bool(sct.get("IsFastestSectorNumberOverall"))}
+                for sct in (r.get("LatestSectors") or [])
+            ],
         }
         for r in sorted(riders_raw, key=lambda x: x.get("Position") or 999)
     ]
