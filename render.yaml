@@ -18,3 +18,10 @@ services:
         sync: false             # set this secret in the Render dashboard
       - key: PYTHON_VERSION
         value: "3.12.8"
+      # Live Activity APNs credentials — set values in the Render dashboard.
+      - key: APNS_KEY_B64
+        sync: false
+      - key: APNS_KEY_ID
+        sync: false
+      - key: APNS_TEAM_ID
+        sync: false

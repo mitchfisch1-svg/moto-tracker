@@ -221,3 +221,13 @@ ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS prefs JSONB NOT NULL
 -- to the device's global prefs above.
 ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS rider_prefs JSONB NOT NULL
     DEFAULT '{}'::jsonb;
+
+-- Live Activity push tokens (lock-screen running order). 'update' tokens
+-- address one running activity; 'start' tokens (iOS 17.2+) let the server
+-- launch the activity remotely on race day. Tokens rotate; stale ones are
+-- pruned when APNs rejects them.
+CREATE TABLE IF NOT EXISTS live_activity_tokens (
+    token       TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL DEFAULT 'update',   -- 'update' | 'start'
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

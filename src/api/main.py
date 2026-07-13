@@ -27,6 +27,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
+from ..apns import apns_ready, send_live_activity
 from ..config import get_database_url
 from ..notify import notify_work
 
@@ -48,6 +49,60 @@ def _notify_loop():
         time.sleep(_NOTIFY_INTERVAL_S)
 
 
+# Live Activity loop: while a race window is open, push the running order to
+# every registered lock-screen activity every ~15s (Apple budgets frequent
+# updates for the liveactivity push type). No-ops without APNs credentials
+# or registered tokens, so it costs one cheap DB check per tick off-race.
+_LA_INTERVAL_S = 15
+
+
+def _la_content_state(payload):
+    t = payload.get("timing") or {}
+    riders = [
+        {"p": r.get("position"), "n": (r.get("name") or "").split(" ")[-1],
+         "num": str(r.get("number") or ""), "g": (r.get("gap") or "")[:12]}
+        for r in (t.get("riders") or [])[:5]
+    ]
+    clock = t.get("clock") or {}
+    return {
+        "race": (t.get("race_name") or "On track")[:40],
+        "venue": ((payload.get("event") or {}).get("venue") or "")[:28],
+        "riders": riders,
+        "flag": (clock.get("flag") or "")[:12],
+        "remaining": clock.get("remaining"),
+    }
+
+
+def _live_activity_loop():
+    import httpx
+    while True:
+        try:
+            if apns_ready():
+                rows = query("SELECT token, kind FROM live_activity_tokens")
+                if rows:
+                    payload = live()
+                    if payload.get("live") and payload.get("timing"):
+                        state = _la_content_state(payload)
+                        stale = []
+                        with httpx.Client(http2=True, timeout=15) as client:
+                            for row in rows:
+                                if row["kind"] != "update":
+                                    continue
+                                ok, reason = send_live_activity(
+                                    row["token"], "update", state, client=client)
+                                if reason in ("BadDeviceToken", "Unregistered",
+                                              "ExpiredToken"):
+                                    stale.append(row["token"])
+                        if stale:
+                            with _pool.connection() as conn:
+                                conn.execute(
+                                    "DELETE FROM live_activity_tokens "
+                                    "WHERE token = ANY(%s)", (stale,))
+        except Exception:
+            pass   # next tick retries
+        time.sleep(_LA_INTERVAL_S)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
@@ -60,6 +115,8 @@ async def lifespan(app: FastAPI):
     )
     _pool.open()
     threading.Thread(target=_notify_loop, daemon=True, name="notify-loop").start()
+    threading.Thread(target=_live_activity_loop, daemon=True,
+                     name="live-activity-loop").start()
     try:
         yield
     finally:
@@ -1095,6 +1152,34 @@ def push_register(body: PushRegister):
                  Json(body.rider_prefs or {})),
             )
     return {"ok": True, "following": len(body.rider_ids), "prefs": prefs}
+
+
+class LiveActivityRegister(BaseModel):
+    token: str
+    kind: str = "update"   # 'update' (one running activity) | 'start' (iOS 17.2+)
+
+
+@app.post("/live-activity/register")
+def live_activity_register(body: LiveActivityRegister):
+    """Store a Live Activity APNs token so the race-day loop can address the
+    lock-screen activity. Tokens rotate freely; stale ones self-prune when
+    Apple rejects them."""
+    if body.kind not in ("update", "start"):
+        raise HTTPException(status_code=400, detail="kind must be update|start")
+    if not re.fullmatch(r"[0-9a-fA-F]{32,200}", body.token or ""):
+        raise HTTPException(status_code=400, detail="not an APNs token")
+    with _pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO live_activity_tokens (token, kind, updated_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (token) DO UPDATE
+                  SET kind = EXCLUDED.kind, updated_at = now()
+                """,
+                (body.token, body.kind),
+            )
+    return {"ok": True}
 
 
 # --- rundown (newcomer "catch me up" on the current field) -------------------

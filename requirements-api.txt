@@ -8,3 +8,7 @@ python-dotenv
 requests
 beautifulsoup4
 
+# Live Activity pushes: direct APNs over HTTP/2 with an ES256 provider JWT.
+PyJWT
+cryptography
+httpx[http2]
