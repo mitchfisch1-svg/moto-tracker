@@ -42,7 +42,7 @@ _TC_RACE_RE = re.compile(r"RACE\s*#?\s*\d")
 # Designs Red Bull GasGas"), the make is conventionally last, so we keep the
 # one that appears furthest into the string.
 MANUFACTURERS = [
-    "KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS",
+    "KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS", "GAS GAS",
     "Husqvarna", "Ducati", "Triumph", "Beta", "Stark",
 ]
 
@@ -57,7 +57,7 @@ def manufacturer_from_team(team):
         pos = up.rfind(make.upper())
         if pos > best_pos:
             best, best_pos = make, pos
-    return "GasGas" if best == "GASGAS" else best
+    return "GasGas" if best in ("GASGAS", "GAS GAS") else best
 
 
 def classify(label: str):

@@ -523,6 +523,84 @@ def news(limit: int = Query(20, le=100), source: str | None = None):
     return query(sql, params)
 
 
+# Words that mark a headline as a big deal (wins, injuries, silly season…).
+_BIG_NEWS_RE = re.compile(
+    r"\b(wins?|victory|sweeps?|champion(ship)?|clinch\w*|injur\w*|surgery|"
+    r"out for|sidelined|signs?|signing|re-signs?|breaking|retire\w*|"
+    r"red plate|first career|penal\w*|suspend\w*|fined?)\b", re.I)
+
+
+@app.get("/news/top")
+def news_top(limit: int = Query(3, le=6)):
+    """The big stories of the moment, for the app's Top Stories digest.
+
+    Deterministic scoring over the last 48h: keyword hits in the headline,
+    the same rider surname appearing across multiple outlets (everyone
+    covers real news), and recency. Falls back to the newest items when
+    nothing scores highly.
+    """
+    arts = query(
+        """
+        SELECT a.title, a.url, a.summary, a.published_at, src.name AS source
+        FROM news_articles a
+        LEFT JOIN sources src ON src.id = a.source_id
+        WHERE COALESCE(a.published_at, a.fetched_at) >= now() - interval '48 hours'
+        ORDER BY a.published_at DESC NULLS LAST
+        LIMIT 60
+        """
+    )
+    surnames = [r["s"] for r in query(
+        """
+        SELECT DISTINCT lower(split_part(full_name, ' ',
+               array_length(string_to_array(full_name, ' '), 1))) AS s
+        FROM riders WHERE length(full_name) > 0
+        """
+    ) if len(r["s"]) > 3]
+
+    # How often each rider surname appears across DISTINCT outlets right now.
+    mentions: dict[str, set] = {}
+    for a in arts:
+        hay = (a["title"] or "").lower()
+        for sn in surnames:
+            if sn in hay:
+                mentions.setdefault(sn, set()).add(a["source"])
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    scored = []
+    for a in arts:
+        title = a["title"] or ""
+        hay = title.lower()
+        score = 3.0 * len(_BIG_NEWS_RE.findall(title))
+        for sn, outlets in mentions.items():
+            if sn in hay and len(outlets) > 1:
+                score += 2.0 * len(outlets)   # cross-outlet story
+        if a["published_at"]:
+            hours = max(0.0, (now - a["published_at"]).total_seconds() / 3600)
+            score += max(0.0, 2.0 - hours / 12)   # freshness nudge
+        scored.append((score, a))
+
+    scored.sort(key=lambda x: -x[0])
+    out, seen_titles = [], set()
+    for score, a in scored:
+        key = (a["title"] or "").lower()[:60]
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        summary = re.sub(r"<[^>]+>", "", a["summary"] or "")
+        summary = re.sub(r"\s+", " ", summary).strip()
+        out.append({
+            "title": a["title"],
+            "summary": summary[:280] + ("…" if len(summary) > 280 else ""),
+            "source": a["source"],
+            "url": a["url"],
+            "published_at": a["published_at"],
+            "big": score >= 3.0,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
 # --- riders ----------------------------------------------------------------
 @app.get("/riders")
 def riders(search: str | None = None, limit: int = Query(25, le=100)):
@@ -788,7 +866,7 @@ _SESSION_VIEWS = {"view_race_result", "view_multi_main_result",
                   "view_combined_round_ranking"}
 
 # Bike makes recognized inside team names (kept in sync with results_html.py).
-_MAKES = ["KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS",
+_MAKES = ["KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS", "GAS GAS",
           "Husqvarna", "Ducati", "Triumph", "Beta", "Stark"]
 
 # Both session endpoints scrape the results site on demand; short TTL caches
@@ -865,7 +943,7 @@ def _make_from_team(team):
         pos = up.rfind(make.upper())
         if pos > best_pos:
             best, best_pos = make, pos
-    return "GasGas" if best == "GASGAS" else best
+    return "GasGas" if best in ("GASGAS", "GAS GAS") else best
 
 
 @app.get("/live/sessions")
