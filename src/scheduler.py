@@ -75,11 +75,65 @@ def news_work():
     log.info("news: done (%s articles)", count)
 
 
+def _catch_up_missed_rounds(conn):
+    """Re-ingest recent rounds that finished but have no results.
+
+    Ingest can fail during a race window for all sorts of reasons (results id
+    never published, the site down, a deploy mid-race). Before this, a failure
+    there was permanent: results_work only ever looked at LIVE events, so once
+    the window closed nobody retried and the round stayed missing until a human
+    noticed the standings were wrong. Spring Creek sat broken for two days that
+    way, showing the wrong 250 championship leader to live App Store users.
+
+    Cheap when there's nothing to do: one indexed query, and we only reach for
+    the network if a round is genuinely missing.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT e.id FROM events e
+            WHERE e.status = 'final'
+              AND e.event_date >= current_date - 21
+              AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.event_id = e.id)
+            """
+        )
+        missed = {row[0] for row in cur.fetchall()}
+    if not missed:
+        return
+
+    log.warning("results: %s recent final round(s) have NO results — catching up",
+                len(missed))
+    # A round with no results id can only be recovered while it's still the
+    # current event on the results homepage; one that already has an id can be
+    # retried at any time.
+    resolve_missing_event_ids(conn)
+    events = [e for e in select_events(conn, target_status="final")
+              if e["event_id"] in missed]
+    if not events:
+        log.warning("results: catch-up found no usable results id yet; "
+                    "will retry next run")
+        return
+
+    adapter = ResultsHTMLAdapter()
+    season_ids = set()
+    for ev in events:
+        try:
+            adapter.ingest_event(conn, ev)
+            season_ids.add(ev["season_id"])
+        except Exception:
+            log.exception("results: catch-up failed for event %s", ev["event_id"])
+    for sid in season_ids:
+        recompute_standings(conn, season_id=sid)
+    log.info("results: caught up %s missed round(s)", len(events))
+
+
 def results_work():
     with get_connection() as conn:
         live = update_event_statuses(conn)
         if not live:
-            log.info("results: no live events; skipping")
+            # No race on right now — but a previous round may have silently
+            # failed to ingest, so check before going back to sleep.
+            _catch_up_missed_rounds(conn)
             return
         events = select_events(conn, target_status="live")
         if not events:
