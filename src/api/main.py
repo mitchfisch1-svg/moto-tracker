@@ -1832,3 +1832,81 @@ def event(event_id: int):
         [event_id],
     )
     return {"event": info[0], "sessions": sessions, "results": results}
+
+
+# --- video feed ---------------------------------------------------------------
+# YouTube publishes a public RSS feed per channel (no API key, no quota) listing
+# the latest uploads — enough for a browsable feed. The app plays these through
+# YouTube's official IFrame player, which is what their terms require: we never
+# touch the underlying streams. That also sidesteps the broadcast-footage
+# copyright problem entirely — this is the publishers' own content, in their own
+# player, with their ads intact.
+#
+# Two exclusions worth remembering so nobody "helpfully" re-adds them: the
+# @vitalmx handle resolves to "Vital MTB" (mountain biking, not moto), and
+# Swapmoto Live's channel (UCvOh-WOBvelVw2akcAdjyMQ) serves a valid but EMPTY
+# feed — 0 entries. A dead channel degrades gracefully here, it's just a wasted
+# request every cycle.
+_YT_CHANNELS = [
+    ("SuperMotocross", "UCcAjWBbd4aO4AhoovRKNbag"),   # official SX/SMX
+    ("Pro Motocross",  "UCKtQ4DDoVusEa1i_Q8OEyew"),   # official MX
+    ("Racer X",        "UCzLDrufzDTIQX_F20r0EiMA"),
+    ("PulpMX",         "UCpMfM2f4b6ehg1H_olAx02Q"),
+    ("Gypsy Tales",    "UCsBGR5UR7UCyLvNbHSxisFQ"),
+]
+_YT_RSS = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
+_VIDEOS_TTL = 900            # uploads aren't frequent; 15 min is plenty
+_VIDEOS_CACHE: dict = {}     # 'all' -> (expires_at, items)
+
+_YT_ENTRY_RE = re.compile(r"<entry>(.*?)</entry>", re.S)
+_YT_VID_RE = re.compile(r"<yt:videoId>(.*?)</yt:videoId>")
+_YT_TITLE_RE = re.compile(r"<title>(.*?)</title>", re.S)
+_YT_PUB_RE = re.compile(r"<published>(.*?)</published>")
+
+
+def _yt_channel_videos(name: str, channel_id: str):
+    """Latest uploads for one channel. Never raises — one dead channel must not
+    empty the whole feed."""
+    from html import unescape
+    out = []
+    try:
+        resp = requests.get(_YT_RSS.format(channel_id), timeout=15)
+        for block in _YT_ENTRY_RE.findall(resp.text):
+            vid = _YT_VID_RE.search(block)
+            title = _YT_TITLE_RE.search(block)
+            if not vid or not title:
+                continue
+            pub = _YT_PUB_RE.search(block)
+            vid_id = vid.group(1)
+            out.append({
+                "video_id": vid_id,
+                "title": unescape(title.group(1)).strip(),
+                "channel": name,
+                "published_at": pub.group(1) if pub else None,
+                "thumbnail": f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg",
+                "url": f"https://www.youtube.com/watch?v={vid_id}",
+            })
+    except Exception:
+        pass
+    return out
+
+
+@app.get("/videos")
+def videos(limit: int = 40):
+    """Latest moto videos across the major channels, newest first."""
+    hit = _VIDEOS_CACHE.get("all")
+    if hit and hit[0] > time.time():
+        return hit[1][:limit]
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = [ex.submit(_yt_channel_videos, n, c) for n, c in _YT_CHANNELS]
+        items = [v for f in futs for v in f.result()]
+
+    if items:
+        items.sort(key=lambda x: x.get("published_at") or "", reverse=True)
+        _VIDEOS_CACHE["all"] = (time.time() + _VIDEOS_TTL, items)
+        _db_cache_put("videos:latest", items)
+        return items[:limit]
+
+    # Every channel failed (network blip) — serve the last good copy.
+    return (_db_cache_get("videos:latest") or [])[:limit]
