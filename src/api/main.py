@@ -781,6 +781,48 @@ def _rider_status(r: dict) -> str:
     return "running"
 
 
+# --- "is the day actually over?" -------------------------------------------
+# The race window alone is a bad liveness signal: it runs hours past the last
+# checkered flag, which left Race Day stuck on red LIVE and Live Activities
+# parked on lock screens showing "Waiting for the gate…". So we also look at
+# the feed itself and retire the day once the program's FINAL race is done.
+#
+# Matching the final race per series matters — a moto finishing mid-program
+# must NOT end the day (there's another one coming), only the last one does.
+_FINAL_RACE_RE = {
+    "MX":  re.compile(r"450.*moto\D*2\b", re.I),          # 450 Moto #2 closes MX
+    "SX":  re.compile(r"450.*(?:main|race\D*3\b)", re.I),  # 450 Main (or Race #3, Triple Crown)
+    "SMX": re.compile(r"450.*main", re.I),
+}
+# Keep the final running order up briefly after the checkered so the finish is
+# visible, then hand over to the official results.
+_DAY_DONE_GRACE_S = 600
+_DAY_DONE_AT: dict = {}   # event_id -> monotonic stamp of first "final race done"
+
+
+def _race_finished(timing) -> bool:
+    """True when the on-track race has taken the checkered / gone official."""
+    clock = timing.get("clock") or {}
+    flag = str(clock.get("flag") or "").lower()
+    status = str(timing.get("race_status") or "").lower()
+    remaining = clock.get("remaining")
+    if "checker" in flag or "finish" in flag:
+        return True
+    if any(k in status for k in ("complete", "official", "finish")):
+        return True
+    msgs = " ".join(str(a.get("m") or "") for a in (timing.get("announcements") or []))
+    if "checkered" in msgs.lower():
+        # Belt-and-braces: the clock also has to have run out, so a checkered
+        # from the PREVIOUS race can't retire the day while the next one runs.
+        return not remaining or float(remaining) <= 0
+    return False
+
+
+def _is_final_race_of_day(race_name, series) -> bool:
+    pat = _FINAL_RACE_RE.get(str(series or "").upper())
+    return bool(pat and race_name and pat.search(str(race_name)))
+
+
 @app.get("/live")
 def live(demo: bool = False):
     """Live-timing snapshot for the event happening now (if any).
@@ -905,6 +947,21 @@ def live(demo: bool = False):
         "riders": riders,
         "announcements": announcements,
     }
+
+    # Retire the day once the program's FINAL race is done (plus a short grace
+    # so the finish stays visible). This is what drops Race Day out of red LIVE
+    # and lets _live_activity_loop tear down lock-screen activities, instead of
+    # both lingering for hours on the time window alone. Demo replays are exempt.
+    if not is_demo and _race_finished(timing) and _is_final_race_of_day(
+            timing.get("race_name"), ev.get("series")):
+        first = _DAY_DONE_AT.setdefault(ev["event_id"], time.monotonic())
+        if time.monotonic() - first >= _DAY_DONE_GRACE_S:
+            nxt = next_events(limit=1)
+            return {"live": False, "day_complete": True, "event": ev,
+                    "next_event": nxt[0] if nxt else None}
+    else:
+        _DAY_DONE_AT.pop(ev.get("event_id"), None)
+
     return {"live": True, "demo": is_demo, "event": ev, "timing": timing}
 
 
