@@ -26,7 +26,7 @@ from .adapters.results_html import ResultsHTMLAdapter
 from .adapters.schedule_smx import ScheduleSMXAdapter
 from .db import get_connection
 from .notify import notify_work
-from .pipeline.run_results import select_events
+from .pipeline.run_results import resolve_missing_event_ids, select_events
 from .standings import recompute_standings
 
 logging.basicConfig(
@@ -90,7 +90,15 @@ def results_work():
             ScheduleSMXAdapter().run()
             events = select_events(conn, target_status="live")
         if not events:
-            log.info("results: still no results id for the live event(s)")
+            # The schedule page frequently NEVER publishes the results link, so
+            # the refresh above is a dead end (that's how RedBud, Denver,
+            # Southwick and Spring Creek all silently failed to ingest).
+            # Recover the id straight from the results homepage instead.
+            if resolve_missing_event_ids(conn):
+                events = select_events(conn, target_status="live")
+        if not events:
+            log.warning("results: still no results id for the live event(s) — "
+                        "this round will NOT ingest")
             return
         log.info("results: ingesting %s live event(s)", len(events))
         adapter = ResultsHTMLAdapter()

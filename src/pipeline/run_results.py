@@ -24,6 +24,72 @@ from src.standings import recompute_standings  # noqa: E402
 
 _SMX_ID_RE = re.compile(r"view_event&id=(\d+)")
 
+# Recovering rounds the schedule page never linked ---------------------------
+# supermotocross.com/schedule/ often never publishes a round's results link, so
+# events.source_url stays the generic schedule URL, select_events() skips the
+# event, and the round SILENTLY never ingests. That has now cost us RedBud,
+# Denver, Southwick and Spring Creek — the last one left live App Store users on
+# stale standings (and the wrong 250 championship leader) for two days.
+#
+# The results homepage always shows the current/most recent event and carries
+# event_files/{lrm}/{smx} in its asset paths, so the id can be recovered from
+# there. Venue-matched against the page title so we can never staple one round's
+# id onto another.
+_RESULTS_HOME = "https://results.supermotocross.com/results/"
+_ASSET_RE = re.compile(r"event_files/(\d+)/(\d+)")
+_TITLE_RE = re.compile(r"<title>(.*?)</title>", re.I | re.S)
+
+
+def resolve_missing_event_ids(conn):
+    """Backfill source_url/lrm_id for rounds whose results link was never posted.
+
+    Returns a list of (event_id, venue, smx_id, lrm_id) recovered. Safe to call
+    every run: events that already carry a view_event id are ignored.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, venue, event_date FROM events
+            WHERE COALESCE(source_url, '') NOT LIKE '%%view_event%%'
+              AND venue IS NOT NULL
+            ORDER BY event_date DESC
+            """
+        )
+        candidates = cur.fetchall()
+    if not candidates:
+        return []
+
+    try:
+        import requests
+        html = requests.get(_RESULTS_HOME, timeout=20).text
+    except Exception as exc:                      # network hiccup — try next run
+        print(f"  results homepage unreachable ({exc}); skipping id recovery")
+        return []
+
+    asset = _ASSET_RE.search(html)
+    if not asset:
+        return []
+    lrm_id, smx_id = asset.group(1), asset.group(2)
+    title_m = _TITLE_RE.search(html)
+    title = (title_m.group(1) if title_m else "").lower()
+    if not title:
+        return []
+
+    # Only the newest venue match wins, so a same-venue round from a previous
+    # season can't hijack the current event's id.
+    for eid, venue, _date in candidates:
+        if venue.lower() in title:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE events SET source_url = %s, lrm_id = %s WHERE id = %s",
+                    (f"{_RESULTS_HOME}?p=view_event&id={smx_id}", lrm_id, eid),
+                )
+            conn.commit()
+            print(f"  recovered results id for {venue}: "
+                  f"smx={smx_id} lrm={lrm_id} (schedule page never linked it)")
+            return [(eid, venue, smx_id, lrm_id)]
+    return []
+
 
 def select_events(conn, smx_id=None, limit=None, target_status="final"):
     """Return event dicts to ingest (only those with a results event id).
@@ -116,6 +182,10 @@ def main():
 
     adapter = ResultsHTMLAdapter()
     with get_connection() as conn:
+        # Recover any round the schedule page never linked, so it stops being
+        # silently skipped below.
+        if not args.smx_id:
+            resolve_missing_event_ids(conn)
         events = select_events(conn, smx_id=args.smx_id, limit=args.limit)
         if not events:
             print("No matching events to ingest.")
