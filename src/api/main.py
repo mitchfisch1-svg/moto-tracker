@@ -1910,3 +1910,106 @@ def videos(limit: int = 40):
 
     # Every channel failed (network blip) — serve the last good copy.
     return (_db_cache_get("videos:latest") or [])[:limit]
+
+
+# --- podcasts -----------------------------------------------------------------
+# Standard podcast RSS: each <item> carries an <enclosure> pointing at the audio
+# file, which is exactly what a player needs. Feed URLs came from the iTunes
+# lookup API (entity=podcast exposes feedUrl), and every one was verified to have
+# a 1:1 item->enclosure ratio before being listed here.
+_PODCAST_FEEDS = [
+    ("The PulpMX Show",  "https://www.pulpmx.com/apptabs/z_pmxs.xml"),
+    ("Steve Matthes Show", "https://www.pulpmx.com/apptabs/z_tsms.xml"),
+    ("Racer X Podcast",  "https://rss.libsyn.com/shows/117643/destinations/676139.xml"),
+    ("Gypsy Tales",      "https://rss.art19.com/gypsy-tales"),
+    ("Swapmoto Live",    "https://www.podserve.fm/series/rss/20/swapmoto-live-podcast.rss"),
+    ("Whiskey Throttle", "https://anchor.fm/s/dbada008/podcast/rss"),
+]
+# Back catalogues are enormous (Steve Matthes alone has 2,700+ episodes), so we
+# only keep the newest few per show and cache hard — new episodes are weekly.
+_POD_PER_SHOW = 8
+_PODCASTS_TTL = 1800
+_PODCASTS_CACHE: dict = {}
+
+_POD_ITEM_RE = re.compile(r"<item[^>]*>(.*?)</item>", re.S)
+_POD_TITLE_RE = re.compile(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", re.S)
+_POD_ENC_RE = re.compile(r"<enclosure[^>]+url=\"([^\"]+)\"", re.I)
+_POD_DATE_RE = re.compile(r"<pubDate>(.*?)</pubDate>", re.S)
+_POD_DUR_RE = re.compile(r"<itunes:duration>(.*?)</itunes:duration>", re.I | re.S)
+_POD_IMG_RE = re.compile(r"<itunes:image[^>]+href=\"([^\"]+)\"", re.I)
+
+
+def _pod_duration(raw):
+    """<itunes:duration> is either H:MM:SS or a bare seconds count depending on
+    the host (Swapmoto sends "3800", the rest send "1:58:13"). Normalise so the
+    app never has to guess."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if ":" in raw:
+        return raw
+    try:
+        secs = int(float(raw))
+    except ValueError:
+        return raw
+    hrs, rem = divmod(secs, 3600)
+    mins, sec = divmod(rem, 60)
+    return f"{hrs}:{mins:02d}:{sec:02d}" if hrs else f"{mins}:{sec:02d}"
+
+
+def _podcast_episodes(show: str, feed_url: str):
+    """Newest episodes for one show. Never raises."""
+    from email.utils import parsedate_to_datetime
+    from html import unescape
+    out = []
+    try:
+        body = requests.get(feed_url, timeout=25).text
+        art = _POD_IMG_RE.search(body)          # channel art precedes the items
+        artwork = art.group(1) if art else None
+        for block in _POD_ITEM_RE.findall(body)[:_POD_PER_SHOW]:
+            enc = _POD_ENC_RE.search(block)
+            title = _POD_TITLE_RE.search(block)
+            if not enc or not title:
+                continue
+            published = None
+            d = _POD_DATE_RE.search(block)
+            if d:
+                try:
+                    dt = parsedate_to_datetime(d.group(1).strip())
+                    if dt.tzinfo:               # normalise so ISO strings sort
+                        dt = dt.astimezone(datetime.timezone.utc)
+                    published = dt.isoformat()
+                except Exception:
+                    published = None
+            dur = _POD_DUR_RE.search(block)
+            out.append({
+                "show": show,
+                "title": unescape(title.group(1)).strip(),
+                "audio_url": enc.group(1),
+                "published_at": published,
+                "duration": _pod_duration(dur.group(1)) if dur else None,
+                "artwork": artwork,
+            })
+    except Exception:
+        pass
+    return out
+
+
+@app.get("/podcasts")
+def podcasts(limit: int = 40):
+    """Newest episodes across the major moto podcasts, newest first."""
+    hit = _PODCASTS_CACHE.get("all")
+    if hit and hit[0] > time.time():
+        return hit[1][:limit]
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = [ex.submit(_podcast_episodes, n, u) for n, u in _PODCAST_FEEDS]
+        items = [e for f in futs for e in f.result()]
+
+    if items:
+        items.sort(key=lambda x: x.get("published_at") or "", reverse=True)
+        _PODCASTS_CACHE["all"] = (time.time() + _PODCASTS_TTL, items)
+        _db_cache_put("podcasts:latest", items)
+        return items[:limit]
+
+    return (_db_cache_get("podcasts:latest") or [])[:limit]

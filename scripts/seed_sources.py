@@ -20,6 +20,28 @@ from src.db import get_connection, upsert  # noqa: E402
 
 SOURCES = [
     {
+        "name": "Gate Drop",
+        "url": "https://gatedrop.com",
+        "feed_url": "https://gatedrop.com/feed/",
+        "type": "rss",
+        "active": True,
+    },
+    {
+        "name": "Vurb Moto",
+        "url": "https://vurbmoto.com",
+        "feed_url": "https://vurbmoto.com/feed/",
+        "type": "rss",
+        "active": True,
+    },
+    {
+        # International (MXGP) coverage — broadens us past the AMA paddock.
+        "name": "MXGP",
+        "url": "https://www.mxgp.com",
+        "feed_url": "https://www.mxgp.com/rss.xml",
+        "type": "rss",
+        "active": True,
+    },
+    {
         "name": "Racer X",
         "url": "https://racerxonline.com",
         "feed_url": "https://racerxonline.com/feeds/rss/posts",

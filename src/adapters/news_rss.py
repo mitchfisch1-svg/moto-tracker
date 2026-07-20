@@ -15,7 +15,12 @@ from bs4 import BeautifulSoup
 from ..db import get_connection, upsert
 from .base import BaseAdapter
 
-USER_AGENT = "MotoTracker/0.1 (personal project; +https://github.com/)"
+# Identifies us honestly (name + contact URL) but keeps the conventional
+# "Mozilla/5.0 (compatible; ...)" shape that most CDNs require — the bare
+# "MotoTracker/0.1" form was getting 403'd by several publishers.
+# Sites that block this too (MXA, Direct Motocross) are deliberately refusing
+# crawlers, so we leave them alone rather than spoofing a full browser.
+USER_AGENT = "Mozilla/5.0 (compatible; MotoTracker/1.0; +https://motoxtracker.com)"
 
 # Be polite: pause between feed fetches.
 REQUEST_DELAY_SECONDS = 1.0
