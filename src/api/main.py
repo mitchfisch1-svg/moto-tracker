@@ -2013,3 +2013,104 @@ def podcasts(limit: int = 40):
         return items[:limit]
 
     return (_db_cache_get("podcasts:latest") or [])[:limit]
+
+
+# --- head-to-head rider comparison --------------------------------------------
+# A season's story is usually a rivalry — the Lawrence brothers are 12 points
+# apart with rounds to go. Every moto finish is already stored, so this needs no
+# new data collection, just the right query.
+@app.get("/compare")
+def compare(
+    a: int,
+    b: int,
+    series: str = "MX",
+    klass: str | None = Query("450", alias="class"),
+    year: int | None = None,
+):
+    """Season-long head-to-head between two riders in one class."""
+    year = year or _current_year()
+    ids = [a, b]
+
+    riders = {
+        r["rider_id"]: dict(r, points=None, position=None, wins=None, podiums=None)
+        for r in query(
+            """
+            SELECT r.id AS rider_id, r.full_name, r.number, r.team,
+                   r.manufacturer, r.headshot_url
+            FROM riders r WHERE r.id = ANY(%s)
+            """,
+            (ids,),
+        )
+    }
+    if len(riders) < 2:
+        raise HTTPException(status_code=404, detail="rider not found")
+
+    for st in query(
+        """
+        SELECT st.rider_id, st.position, st.points, st.wins, st.podiums
+        FROM standings st
+        JOIN seasons se ON se.id = st.season_id
+        JOIN series  s  ON s.id  = se.series_id
+        WHERE s.abbrev = %s AND se.year = %s AND st.class = %s
+          AND st.rider_id = ANY(%s)
+        """,
+        (series.upper(), year, klass, ids),
+    ):
+        riders[st["rider_id"]].update(
+            position=st["position"], points=st["points"],
+            wins=st["wins"], podiums=st["podiums"])
+
+    rows = query(
+        """
+        SELECT e.round_number, e.venue, e.event_date, ses.id AS session_id,
+               ses.label, res.rider_id, res.position, res.points
+        FROM results res
+        JOIN sessions ses ON ses.id = res.session_id
+        JOIN events   e   ON e.id   = ses.event_id
+        JOIN seasons  se  ON se.id  = e.season_id
+        JOIN series   s   ON s.id   = se.series_id
+        WHERE s.abbrev = %s AND se.year = %s AND ses.class = %s
+          AND ses.type IN ('main', 'moto') AND res.rider_id = ANY(%s)
+        ORDER BY e.round_number, ses.id
+        """,
+        (series.upper(), year, klass, ids),
+    )
+
+    rounds: dict = {}
+    for r in rows:
+        rnd = rounds.setdefault(r["round_number"], {
+            "round": r["round_number"], "venue": r["venue"],
+            "date": str(r["event_date"]), "sessions": {},
+            "a_points": 0, "b_points": 0,
+        })
+        sess = rnd["sessions"].setdefault(
+            r["session_id"], {"label": r["label"], "a": None, "b": None})
+        side = "a" if r["rider_id"] == a else "b"
+        sess[side] = r["position"]
+        rnd[f"{side}_points"] += r["points"] or 0
+
+    # The headline number: how many motos each rider finished ahead of the
+    # other. Only motos where BOTH actually have a result count, so a DNS by
+    # one rider isn't scored as a "win" for the other.
+    wins_a = wins_b = 0
+    out_rounds = []
+    for rnd in rounds.values():
+        sessions = list(rnd["sessions"].values())
+        for sess in sessions:
+            if sess["a"] and sess["b"]:
+                if sess["a"] < sess["b"]:
+                    wins_a += 1
+                elif sess["b"] < sess["a"]:
+                    wins_b += 1
+        rnd["sessions"] = sessions
+        rnd["winner"] = ("a" if rnd["a_points"] > rnd["b_points"]
+                         else "b" if rnd["b_points"] > rnd["a_points"] else None)
+        out_rounds.append(rnd)
+    out_rounds.sort(key=lambda x: x["round"], reverse=True)
+
+    return {
+        "series": series.upper(), "class": klass, "year": year,
+        "a": riders.get(a), "b": riders.get(b),
+        "head_to_head": {"a": wins_a, "b": wins_b, "motos": wins_a + wins_b},
+        "rounds": out_rounds,
+    }
