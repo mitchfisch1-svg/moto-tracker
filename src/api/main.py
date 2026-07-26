@@ -823,6 +823,105 @@ def _is_final_race_of_day(race_name, series) -> bool:
     return bool(pat and race_name and pat.search(str(race_name)))
 
 
+# --- live combined qualifying -------------------------------------------------
+# Qualifying is only about fastest lap, and the TV shows ONE overall board across
+# both groups — not each group's in-session order. So during qualifying we merge
+# every rider's best lap across all their qualifying sessions (the live group
+# from the LRM feed + the already-finished groups from cached results) into a
+# single class-wide leaderboard sorted by best lap, mirroring the broadcast.
+_QUAL_CLASS_RE = re.compile(r"\b(250|450)\b")
+
+
+def _lap_to_secs(v):
+    """'2:12.562' -> 132.562 ; '132.27' -> 132.27 ; junk/None -> None."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        if ":" in s:
+            mm, rest = s.split(":", 1)
+            return int(mm) * 60 + float(rest)
+        x = float(s)
+        return x if x > 0 else None
+    except ValueError:
+        return None
+
+
+def _secs_to_lap(x):
+    if x is None:
+        return None
+    m = int(x // 60)
+    s = x - m * 60
+    return f"{m}:{s:06.3f}" if m else f"{s:.3f}"
+
+
+def _cached_session_results(sid, p):
+    """Session results from cache only (never scrapes) — keeps /live fast."""
+    hit = _sessions_cache_get((p, sid))
+    if hit is not None:
+        return hit
+    return _db_cache_get(f"{p}:{sid}")
+
+
+def _combined_qualifying(race_name, live_riders):
+    """One class-wide qualifying board (best lap across both groups), or None."""
+    if not race_name or "qualif" not in race_name.lower():
+        return None
+    m = _QUAL_CLASS_RE.search(race_name)
+    if not m:
+        return None
+    cls = m.group(1)
+
+    best = {}   # number -> merged best-lap record
+
+    def add(number, name, secs, manu, team, on_track):
+        number = (str(number or "")).strip()
+        if not number or secs is None:
+            return
+        cur = best.get(number)
+        if cur is None or secs < cur["secs"]:
+            best[number] = {"number": number, "name": name, "secs": secs,
+                            "manufacturer": manu, "team": team,
+                            "on_track": on_track or (cur["on_track"] if cur else False)}
+        elif cur:
+            cur["on_track"] = cur["on_track"] or on_track
+
+    for r in (live_riders or []):
+        add(r.get("number"), r.get("name"), _lap_to_secs(r.get("best_lap")),
+            r.get("manufacturer"), r.get("team"), True)
+
+    try:
+        sessions = live_sessions().get("sessions", [])
+    except Exception:
+        sessions = []
+    for s in sessions:
+        if s.get("kind") != "qualifying" or cls not in (s.get("label") or ""):
+            continue
+        res = _cached_session_results(s.get("id"), s.get("p") or "view_race_result")
+        for row in ((res or {}).get("results") or []):
+            add(row.get("number"), row.get("name"), _lap_to_secs(row.get("primary")),
+                row.get("manufacturer"), row.get("team"), False)
+
+    if not best:
+        return None
+    ranked = sorted(best.values(), key=lambda x: x["secs"])
+    leader = ranked[0]["secs"]
+    return {
+        "klass": cls,
+        "group_label": race_name,   # e.g. "250 Group A Qualifying 2" (the subline)
+        "riders": [
+            {"position": i + 1, "number": x["number"], "name": x["name"],
+             "best_lap": _secs_to_lap(x["secs"]),
+             "gap": (f"+{x['secs'] - leader:.3f}" if i else "Fastest"),
+             "manufacturer": x["manufacturer"], "team": x["team"],
+             "on_track": x["on_track"]}
+            for i, x in enumerate(ranked)
+        ],
+    }
+
+
 @app.get("/live")
 def live(demo: bool = False):
     """Live-timing snapshot for the event happening now (if any).
@@ -947,6 +1046,14 @@ def live(demo: bool = False):
         "riders": riders,
         "announcements": announcements,
     }
+
+    # Qualifying: also expose the class-wide combined board (both groups by best
+    # lap), which is what the broadcast shows and what fans actually want.
+    race_name = timing["race_name"]
+    if race_name and "qualif" in race_name.lower():
+        combined = _combined_qualifying(race_name, riders)
+        if combined:
+            timing["combined_qualifying"] = combined
 
     # Retire the day once the program's FINAL race is done (plus a short grace
     # so the finish stays visible). This is what drops Race Day out of red LIVE
