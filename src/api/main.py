@@ -1698,9 +1698,58 @@ def _title_fight_line(leader, chaser, gap, rounds_left):
             f"{_first_name(chaser)}{left}.")
 
 
+@app.get("/widget/standings")
+def widget_standings():
+    """What the home-screen standings widget should show right now.
+
+    Off race day that's the championship top five. While a session is running
+    it's the live order instead — season points frozen at last week's total are
+    the wrong thing to stare at mid-moto. Deliberately shaped like /rundown so
+    the widget's existing decoder handles both. (iOS decides when to refresh a
+    widget, so this lags the app by minutes; the lock-screen Live Activity is
+    the real-time surface.)
+    """
+    try:
+        lp = live()
+    except Exception:
+        lp = None
+    lt = (lp or {}).get("timing") if (lp or {}).get("live") else None
+    if lt:
+        cq = lt.get("combined_qualifying")
+        src = (cq.get("riders") if cq else lt.get("riders")) or []
+        state = lt.get("race_state") or "racing"
+        rows = [
+            {"position": r.get("position"), "rider_id": None,
+             "full_name": r.get("name"), "points": None,
+             "detail": (r.get("best_lap") if cq
+                        else ("Leader" if r.get("position") == 1 else r.get("gap")))}
+            for r in src[:5]
+        ]
+        if rows:
+            label = lt.get("race_name") or "On track"
+            if state == "staged":
+                label += " · on the gate"
+            elif state == "finished":
+                label += " · final"
+            return {"live": True,
+                    "series_long": ((lp.get("event") or {}).get("venue")
+                                    or "Race day"),
+                    "classes": [{"klass": label, "top5": rows}]}
+    rd = rundown()
+    return {"live": False, "series_long": rd.get("series_long"),
+            "classes": rd.get("classes")}
+
+
 @app.get("/rundown")
 def rundown():
-    """A newcomer-friendly 'catch me up' on the currently-active series."""
+    """A newcomer-friendly 'catch me up' on the currently-active series.
+
+    On race day this returns the CURRENT session's running order instead of the
+    season table — the home-screen widget reads this endpoint, and season points
+    frozen at last week's total are the wrong thing to show mid-moto. (iOS still
+    decides when to refresh a widget, so this lags the app; the lock-screen Live
+    Activity remains the real-time surface.)
+    """
     year = _current_year()
 
     # Active series = the next upcoming event's, else the latest completed one's.
