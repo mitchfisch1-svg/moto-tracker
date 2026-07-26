@@ -833,20 +833,21 @@ _QUAL_CLASS_RE = re.compile(r"\b(250|450)\b")
 
 
 def _lap_to_secs(v):
-    """'2:12.562' -> 132.562 ; '132.27' -> 132.27 ; junk/None -> None."""
+    """Best-lap value -> seconds. Handles '2:16.623 (5)' (the results page tacks
+    on the lap number), '2:12.562', and the LRM feed's bare seconds float."""
     if v is None:
         return None
     s = str(v).strip()
     if not s:
         return None
-    try:
-        if ":" in s:
-            mm, rest = s.split(":", 1)
-            return int(mm) * 60 + float(rest)
-        x = float(s)
+    m = re.match(r"(\d+):(\d+(?:\.\d+)?)", s)          # M:SS.mmm ( lap# )
+    if m:
+        return int(m.group(1)) * 60 + float(m.group(2))
+    m = re.match(r"(\d+(?:\.\d+)?)", s)                # bare seconds
+    if m:
+        x = float(m.group(1))
         return x if x > 0 else None
-    except ValueError:
-        return None
+    return None
 
 
 def _secs_to_lap(x):
