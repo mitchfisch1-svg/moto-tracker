@@ -823,6 +823,27 @@ def _is_final_race_of_day(race_name, series) -> bool:
     return bool(pat and race_name and pat.search(str(race_name)))
 
 
+def _race_started(timing) -> bool:
+    """Has the session actually gone green? The feed publishes the grid (with a
+    full clock and everyone on 0 laps) once a session is staged, well before the
+    gate drops — so 'a session exists' must not be read as 'racing'. It's live
+    once the clock has ticked, someone has completed a lap, or race control has
+    flagged green."""
+    riders = timing.get("riders") or []
+    max_laps = max((r.get("laps") or 0) for r in riders) if riders else 0
+    if max_laps > 0:
+        return True
+    clock = timing.get("clock") or {}
+    try:
+        if float(clock.get("elapsed") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    msgs = " ".join(str(a.get("m") or "") for a in
+                    (timing.get("announcements") or [])).lower()
+    return "green" in msgs or "gate drop" in msgs or "holeshot" in msgs
+
+
 # --- live combined qualifying -------------------------------------------------
 # Qualifying is only about fastest lap, and the TV shows ONE overall board across
 # both groups — not each group's in-session order. So during qualifying we merge
@@ -1047,6 +1068,16 @@ def live(demo: bool = False):
         "riders": riders,
         "announcements": announcements,
     }
+
+    # Where this session actually is: staged on the gate, running, or finished.
+    # Without this the app framed a staged grid (everyone on 0 laps, full clock)
+    # as a live race with a "leader", and kept saying LIVE after the checkered.
+    if _race_finished(timing):
+        timing["race_state"] = "finished"
+    elif _race_started(timing):
+        timing["race_state"] = "racing"
+    else:
+        timing["race_state"] = "staged"
 
     # Qualifying: also expose the class-wide combined board (both groups by best
     # lap), which is what the broadcast shows and what fans actually want.
