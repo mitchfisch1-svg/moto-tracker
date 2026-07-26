@@ -59,25 +59,49 @@ _LA_INTERVAL_S = 10
 
 def _la_content_state(payload):
     t = payload.get("timing") or {}
-    riders = [
-        {"p": r.get("position"), "n": (r.get("name") or "").split(" ")[-1],
-         "num": str(r.get("number") or ""), "g": (r.get("gap") or "")[:12]}
-        for r in (t.get("riders") or [])[:5]
-    ]
+    state = t.get("race_state") or "racing"
+    # During qualifying the lock screen should show the same class-wide best-lap
+    # board the app and the broadcast show, not one group's running order.
+    cq = t.get("combined_qualifying")
+    if cq:
+        riders = [
+            {"p": r.get("position"), "n": (r.get("name") or "").split(" ")[-1],
+             "num": str(r.get("number") or ""), "g": (r.get("best_lap") or "")[:12]}
+            for r in (cq.get("riders") or [])[:5]
+        ]
+    else:
+        riders = [
+            {"p": r.get("position"), "n": (r.get("name") or "").split(" ")[-1],
+             "num": str(r.get("number") or ""), "g": (r.get("gap") or "")[:12]}
+            for r in (t.get("riders") or [])[:5]
+        ]
     clock = t.get("clock") or {}
     remaining = clock.get("remaining")
+    # The widget has no state field, so carry the status in the title it already
+    # renders — otherwise a staged grid reads as a race in progress and the card
+    # sits there looking live after the checkered.
+    name = (t.get("race_name") or "On track")
+    if state == "staged":
+        name = f"{name} · on the gate"
+    elif state == "finished":
+        name = f"{name} · final"
     return {
-        "race": (t.get("race_name") or "On track")[:40],
+        "race": name[:40],
         "venue": ((payload.get("event") or {}).get("venue") or "")[:28],
         "riders": riders,
         "flag": (clock.get("flag") or "")[:12],
-        # The widget decodes Int? — LRM sometimes sends fractional seconds.
-        "remaining": int(remaining) if isinstance(remaining, (int, float)) else None,
+        # A staged grid has a full clock that isn't counting down yet — showing it
+        # made the lock screen look like a race was already running.
+        "remaining": (int(remaining)
+                      if state == "racing" and isinstance(remaining, (int, float))
+                      else None),
     }
 
 
 def _live_activity_loop():
     import httpx
+    last_state = None
+    last_push = 0.0
     while True:
         try:
             if apns_ready():
@@ -86,6 +110,16 @@ def _live_activity_loop():
                     payload = live()
                     if payload.get("live") and payload.get("timing"):
                         state = _la_content_state(payload)
+                        # iOS budgets frequent Live Activity updates and silently
+                        # starts dropping them once you blow through it — which is
+                        # how the lock screen ended up frozen mid-session. Only
+                        # spend budget when something actually changed (with a
+                        # heartbeat so a quiet session can't look abandoned).
+                        changed = state != last_state
+                        if not changed and (time.time() - last_push) < 120:
+                            time.sleep(_LA_INTERVAL_S)
+                            continue
+                        last_state, last_push = state, time.time()
                         stale = []
                         # Once per event: remotely launch the activity on every
                         # phone that registered a push-to-start token (iOS 17.2+)
