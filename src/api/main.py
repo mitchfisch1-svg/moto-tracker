@@ -1731,10 +1731,11 @@ def widget_standings():
                 label += " · on the gate"
             elif state == "finished":
                 label += " · final"
+            # Key is "class" (not "klass") — that's what the widget decodes.
             return {"live": True,
                     "series_long": ((lp.get("event") or {}).get("venue")
                                     or "Race day"),
-                    "classes": [{"klass": label, "top5": rows}]}
+                    "classes": [{"class": label, "top5": rows}]}
     rd = rundown()
     return {"live": False, "series_long": rd.get("series_long"),
             "classes": rd.get("classes")}
