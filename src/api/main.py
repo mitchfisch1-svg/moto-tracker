@@ -2162,6 +2162,15 @@ _POD_DUR_RE = re.compile(r"<itunes:duration>(.*?)</itunes:duration>", re.I | re.
 _POD_IMG_RE = re.compile(r"<itunes:image[^>]+href=\"([^\"]+)\"", re.I)
 
 
+def _https(url):
+    """iOS App Transport Security silently refuses plain http:// media, so an
+    http artwork URL just renders blank (that's why the Steve Matthes Show had
+    no cover art). These hosts all serve the same asset over TLS."""
+    if isinstance(url, str) and url.startswith("http://"):
+        return "https://" + url[len("http://"):]
+    return url
+
+
 def _pod_duration(raw):
     """<itunes:duration> is either H:MM:SS or a bare seconds count depending on
     the host (Swapmoto sends "3800", the rest send "1:58:13"). Normalise so the
@@ -2208,10 +2217,10 @@ def _podcast_episodes(show: str, feed_url: str):
             out.append({
                 "show": show,
                 "title": unescape(title.group(1)).strip(),
-                "audio_url": enc.group(1),
+                "audio_url": _https(enc.group(1)),
                 "published_at": published,
                 "duration": _pod_duration(dur.group(1)) if dur else None,
-                "artwork": artwork,
+                "artwork": _https(artwork),
             })
     except Exception:
         pass
