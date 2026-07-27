@@ -448,7 +448,8 @@ def next_events(series: str | None = None, limit: int = Query(3, le=20)):
     sql = """
         SELECT e.id AS event_id, s.abbrev AS series, e.round_number,
                e.round_label, e.venue, e.city, e.state, e.event_date,
-               e.start_time_utc, e.status, e.broadcast, e.tickets_url
+               e.start_time_utc, e.status, e.broadcast, e.tickets_url,
+               e.source_url
         FROM events e
         JOIN seasons se ON se.id = e.season_id
         JOIN series  s  ON s.id  = se.series_id
@@ -461,6 +462,10 @@ def next_events(series: str | None = None, limit: int = Query(3, le=20)):
     sql += " ORDER BY e.event_date LIMIT %s"
     params.append(limit)
     rows = [_decorate_event(r) for r in query(sql, params)]
+    for r in rows:
+        # Null until the round is on track — the results site only publishes a
+        # layout on race weekend. The app says so rather than hiding the entry.
+        r["track_map"] = _event_track_map(r.pop("source_url", None))
     if rows:  # race-day forecast for the very next event only
         rows[0]["weather"] = _event_weather(
             rows[0].get("city"), rows[0].get("state"), rows[0].get("event_date"))
@@ -1305,11 +1310,28 @@ def live_sessions():
         entry_lists.append({"event_id": g.group(1), "class_id": g.group(2),
                             "label": a.get_text(" ", strip=True)})
 
+    # Track maps only exist on this page while the round is on track, so keep a
+    # copy against the event. Otherwise the map vanishes the moment the race
+    # ends and there's no way to look at the layout afterwards.
+    if (track_map.get("2d") or track_map.get("3d")) and entry_lists:
+        _db_cache_put(f"trackmap:{entry_lists[0]['event_id']}", track_map)
+
     payload = {"event_name": event_name, "sessions": sessions,
                "track_map": track_map, "entry_lists": entry_lists}
     _SESSIONS_CACHE["list"] = (time.time() + _SESSIONS_LIST_TTL, payload)
     _db_cache_put("list", payload)
     return payload
+
+
+def _event_track_map(source_url):
+    """The stored track map for an event, keyed by its results-site event id."""
+    m = re.search(r"view_event&id=(\d+)", source_url or "")
+    if not m:
+        return None
+    stored = _db_cache_get(f"trackmap:{m.group(1)}")
+    if stored and (stored.get("2d") or stored.get("3d")):
+        return stored
+    return None
 
 
 @app.get("/live/sessions/{race_id}")
@@ -2028,7 +2050,8 @@ def event(event_id: int):
     info = query(
         """
         SELECT e.id, s.abbrev AS series, e.round_number, e.round_label,
-               e.venue, e.city, e.state, e.event_date, e.start_time_utc, e.status
+               e.venue, e.city, e.state, e.event_date, e.start_time_utc,
+               e.status, e.source_url
         FROM events e
         JOIN seasons se ON se.id = e.season_id
         JOIN series  s  ON s.id  = se.series_id
@@ -2038,6 +2061,7 @@ def event(event_id: int):
     )
     if not info:
         raise HTTPException(status_code=404, detail="event not found")
+    info[0]["track_map"] = _event_track_map(info[0].pop("source_url", None))
     sessions = query(
         "SELECT id, class, type, label FROM sessions WHERE event_id = %s ORDER BY id",
         [event_id],
