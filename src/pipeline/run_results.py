@@ -38,6 +38,13 @@ _SMX_ID_RE = re.compile(r"view_event&id=(\d+)")
 _RESULTS_HOME = "https://results.supermotocross.com/results/"
 _ASSET_RE = re.compile(r"event_files/(\d+)/(\d+)")
 _TITLE_RE = re.compile(r"<title>(.*?)</title>", re.I | re.S)
+# The event id also appears in the Combined Qualifying / Overall links. The
+# event_files asset path only exists while the event is ON TRACK, so relying on
+# it alone silently failed the moment a round was over (cost us Washougal).
+_EVENT_ID_RES = (
+    re.compile(r"p=view_event&(?:amp;)?id=(\d+)"),
+    re.compile(r"view_combined_round_ranking&(?:amp;)?id=(\d+)"),
+)
 
 
 def resolve_missing_event_ids(conn):
@@ -66,10 +73,22 @@ def resolve_missing_event_ids(conn):
         print(f"  results homepage unreachable ({exc}); skipping id recovery")
         return []
 
+    # event_files carries lrm + smx, but only while the event is on track. Once
+    # it's over the id survives in the Combined Qualifying / Overall links, so
+    # fall back to those rather than giving up (which is how Washougal was
+    # missed for a day).
+    lrm_id = smx_id = None
     asset = _ASSET_RE.search(html)
-    if not asset:
+    if asset:
+        lrm_id, smx_id = asset.group(1), asset.group(2)
+    else:
+        for pat in _EVENT_ID_RES:
+            m = pat.search(html)
+            if m:
+                smx_id = m.group(1)
+                break
+    if not smx_id:
         return []
-    lrm_id, smx_id = asset.group(1), asset.group(2)
     title_m = _TITLE_RE.search(html)
     title = (title_m.group(1) if title_m else "").lower()
     if not title:
@@ -80,8 +99,11 @@ def resolve_missing_event_ids(conn):
     for eid, venue, _date in candidates:
         if venue.lower() in title:
             with conn.cursor() as cur:
+                # COALESCE so recovering after the event (no lrm in the page)
+                # can't wipe an lrm_id we already derived during the race.
                 cur.execute(
-                    "UPDATE events SET source_url = %s, lrm_id = %s WHERE id = %s",
+                    "UPDATE events SET source_url = %s, "
+                    "lrm_id = COALESCE(%s, lrm_id) WHERE id = %s",
                     (f"{_RESULTS_HOME}?p=view_event&id={smx_id}", lrm_id, eid),
                 )
             conn.commit()
