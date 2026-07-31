@@ -113,7 +113,14 @@ def _race_window_open() -> bool:
 # harmless. Off race day this backs right off: the only thing waiting is a news
 # alert, which is not worth holding the database open around the clock for.
 _NOTIFY_INTERVAL_S = 60
-_NOTIFY_IDLE_INTERVAL_S = 900
+# The idle cadence has to be read against the 5-minute scale-to-zero timeout,
+# not against "how stale may a news push be": notify_work() touches Postgres on
+# every tick, so each tick also buys a full idle window behind it. At 15 min
+# that is four wakes an hour — the compute is up ~37% of the time and the month
+# lands near 67 CU-hours, most of the allowance, for an empty paddock. Hourly
+# matches pulse.yml's own pass (offset from it, so between the two a news alert
+# still moves inside ~30 min) and drops that to roughly 16.
+_NOTIFY_IDLE_INTERVAL_S = 3600
 
 
 def _notify_loop():
