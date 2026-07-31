@@ -67,10 +67,30 @@ Rough monthly budget after the fix:
 | Source | CU-hours/month |
 | --- | --- |
 | `pulse.yml` (hourly, ~6 min billed per wake) | ~18 |
+| `_notify_loop` idle passes (hourly, overlaps the above) | ~16 |
 | Race weekends (~18 h continuous × 4 rounds) | ~18 |
 | Background-loop gate checks (a handful a day) | ~1 |
 | `schedule.yml`, `recap-video.yml` (weekly) | ~1 |
-| **Headroom left for real user traffic** | **~62** |
+| **Headroom left for real user traffic** | **~46** |
+
+Budget every *interval* against the 5-minute scale-to-zero timeout rather than
+against how fresh the data needs to be. A 15-minute poll is not "four times
+cheaper" than a 5-minute one — both wake the compute on every tick, so the
+honest unit is wakes per hour times ~6 minutes. Anything under about 20 minutes
+is close to leaving it on permanently.
+
+## Compute size, not just compute time
+
+The primary compute autoscales between a **minimum and maximum CU**, and on a
+pay-as-you-go plan the maximum sets how expensive a busy hour can get — 8 CU
+bills 32× what 0.25 CU does for the same wall-clock hour. This workload is a
+small read-only API over a few thousand rows; it has no use for 8 CU. Keep the
+ceiling at 1–2 CU (Neon console → branch → compute → **Edit**) so a traffic
+spike or a bad query cannot quietly run up an eye-watering bill.
+
+Also confirm scale-to-zero stays **enabled**. Paid plans allow turning it off,
+and doing so puts the compute back to billing 24/7 — the exact failure this
+whole document exists to prevent.
 
 ## Rules of thumb before adding a poll or a cron
 
