@@ -1,11 +1,22 @@
 name: results
 
-# Ingest results + standings. The job itself only does work when an event is
-# live (it sets event status from start time and skips otherwise), so most runs
-# are a quick no-op. cron is UTC.
+# Ingest results + standings fast, but only inside the race window. cron is UTC.
+#
+# This used to run every 5 min around the clock. The job self-gates (it skips
+# unless an event is live), but "skip" still opens a Postgres connection, and a
+# connection every 5 min means the Neon compute never reaches its 5-min idle
+# timeout — so it billed 24/7 and blew the free 100 CU-hour quota mid-month,
+# which takes the whole app down with `503 database unavailable`. The fix is to
+# only hold it awake when there is actually a race on.
+#
+# The window below is Sat 15:00 UTC -> Sun 09:00 UTC, i.e. Sat 11am -> Sun 5am
+# ET, which covers Pro Motocross motos (~1pm ET), SX East (~7pm ET) and the west
+# coast late show (~10pm ET). Outside it, pulse.yml picks results up hourly, so
+# a rain-delayed or otherwise off-window round still lands — just not instantly.
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes (fast standings on race day)
+    - cron: "*/5 15-23 * * 6"   # Saturday 15:00-23:59 UTC
+    - cron: "*/5 0-8 * * 0"     # Sunday 00:00-08:59 UTC
   workflow_dispatch:
 
 jobs:
