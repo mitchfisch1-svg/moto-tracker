@@ -18,6 +18,16 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
+      - name: Sync Feld headshots
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/sync_headshots.py
+      # Picks up riders Feld has never shot - new privateers each week, and the
+      # whole WMX field. Runs after Feld so it only ever fills real gaps.
+      - name: Sync Racer X fallbacks
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/sync_racerx_headshots.py
       - name: Audit headshots
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
