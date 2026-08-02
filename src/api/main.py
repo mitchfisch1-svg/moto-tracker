@@ -1165,6 +1165,13 @@ _SESSION_VIEWS = {"view_race_result", "view_multi_main_result",
 # Bike makes recognized inside team names (kept in sync with results_html.py).
 _MAKES = ["KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS", "GAS GAS",
           "Husqvarna", "Ducati", "Triumph", "Beta", "Stark"]
+# The results site misspells some team names — "Rockstar Energy Husqvarana" left
+# a factory rider (DiFrancesco) with no bike at all. Match the variants we've
+# actually seen. Keep in sync with MANUFACTURER_ALIASES in adapters/results_html.
+_MAKE_ALIASES = {
+    "HUSQVARANA": "Husqvarna", "HUSQVARNA": "Husqvarna", "HUSKY": "Husqvarna",
+    "KAWASKI": "Kawasaki", "YAHAMA": "Yamaha",
+}
 
 # Both session endpoints scrape the results site on demand; short TTL caches
 # make chip-taps in the app instant and shield the site from per-user polling.
@@ -1240,6 +1247,10 @@ def _make_from_team(team):
         pos = up.rfind(make.upper())
         if pos > best_pos:
             best, best_pos = make, pos
+    for typo, real in _MAKE_ALIASES.items():   # tolerate the site's misspellings
+        pos = up.rfind(typo)
+        if pos > best_pos:
+            best, best_pos = real, pos
     return "GasGas" if best in ("GASGAS", "GAS GAS") else best
 
 

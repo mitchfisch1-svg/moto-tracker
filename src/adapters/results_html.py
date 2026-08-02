@@ -45,6 +45,13 @@ MANUFACTURERS = [
     "KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS", "GAS GAS",
     "Husqvarna", "Ducati", "Triumph", "Beta", "Stark",
 ]
+# The results site misspells team names — "Rockstar Energy Husqvarana" meant a
+# factory rider showed no bike at all. Keep in sync with _MAKE_ALIASES in
+# api/main.py (the same matching is duplicated there).
+MANUFACTURER_ALIASES = {
+    "HUSQVARANA": "Husqvarna", "HUSQVARNA": "Husqvarna", "HUSKY": "Husqvarna",
+    "KAWASKI": "Kawasaki", "YAHAMA": "Yamaha",
+}
 
 
 def manufacturer_from_team(team):
@@ -57,6 +64,10 @@ def manufacturer_from_team(team):
         pos = up.rfind(make.upper())
         if pos > best_pos:
             best, best_pos = make, pos
+    for typo, real in MANUFACTURER_ALIASES.items():
+        pos = up.rfind(typo)
+        if pos > best_pos:
+            best, best_pos = real, pos
     return "GasGas" if best in ("GASGAS", "GAS GAS") else best
 
 
