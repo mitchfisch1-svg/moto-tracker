@@ -1,0 +1,24 @@
+name: headshots
+
+# Rider photos come from Feld and are name-slugged, so a team change normally
+# takes care of itself. What needs watching is Feld NOT re-shooting someone -
+# they end up racing all season in last year's kit. This flags that on its own
+# instead of anyone noticing by eye.
+on:
+  schedule:
+    - cron: "20 6 * * 1"     # Mondays, after the weekend's results land
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Audit headshots
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/audit_headshots.py

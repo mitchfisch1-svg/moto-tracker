@@ -246,14 +246,21 @@ class ResultsHTMLAdapter:
 
     @staticmethod
     def _update_rider_profiles(conn, profiles):
-        """Refresh riders' team + manufacturer from the latest parsed results."""
+        """Refresh riders' team + manufacturer from the latest parsed results.
+
+        Stamps team_changed_at when the team actually changes. That's the signal
+        the headshot audit uses: a rider who switched teams but whose photo
+        hasn't been re-shot is still wearing the old kit.
+        """
         if not profiles:
             return
         with conn.cursor() as cur:
             cur.executemany(
-                "UPDATE riders SET team = %s, manufacturer = %s, hometown = %s "
+                "UPDATE riders SET team = %s, manufacturer = %s, hometown = %s, "
+                "team_changed_at = CASE "
+                "  WHEN team IS DISTINCT FROM %s THEN now() ELSE team_changed_at END "
                 "WHERE id = %s",
-                [(team, make, home, rid)
+                [(team, make, home, team, rid)
                  for rid, (team, make, home) in profiles.items()],
             )
 

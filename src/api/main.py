@@ -582,7 +582,9 @@ def standings(
     year = year or _current_year()
     sql = """
         SELECT st.class, st.position, r.id AS rider_id, r.full_name, r.number,
-               r.team, r.manufacturer, r.headshot_url, st.points, st.wins,
+               r.team, r.manufacturer,
+               COALESCE(r.headshot_override, r.headshot_url) AS headshot_url,
+               st.points, st.wins,
                st.podiums
         FROM standings st
         JOIN seasons se ON se.id = st.season_id
@@ -776,7 +778,8 @@ def riders(search: str | None = None, limit: int = Query(25, le=100)):
 def rider(rider_id: int):
     info = query(
         "SELECT id, full_name, number, team, manufacturer, hometown, "
-        "headshot_url, country FROM riders WHERE id = %s",
+        "COALESCE(headshot_override, headshot_url) AS headshot_url, country "
+        "FROM riders WHERE id = %s",
         [rider_id],
     )
     if not info:
@@ -1621,7 +1624,8 @@ def _wmx_standings():
         try:
             matches = query(
                 """
-                SELECT id, full_name, team, manufacturer, headshot_url
+                SELECT id, full_name, team, manufacturer,
+                       COALESCE(headshot_override, headshot_url) AS headshot_url
                 FROM riders WHERE lower(full_name) = ANY(%s)
                 """,
                 (names,),
@@ -1958,7 +1962,9 @@ def rundown():
     rows = query(
         """
         SELECT st.class, st.position, r.id AS rider_id, r.full_name, r.number,
-               r.manufacturer, r.headshot_url, r.hometown,
+               r.manufacturer,
+               COALESCE(r.headshot_override, r.headshot_url) AS headshot_url,
+               r.hometown,
                st.points, st.wins, st.podiums
         FROM standings st JOIN seasons se ON se.id = st.season_id
         JOIN series s ON s.id = se.series_id JOIN riders r ON r.id = st.rider_id
@@ -2091,7 +2097,8 @@ def recap():
         """
         SELECT sess.class, sess.id AS session_id, sess.label,
                r.rider_id, ri.full_name, ri.number, ri.manufacturer,
-               ri.headshot_url, r.position, r.points
+               COALESCE(ri.headshot_override, ri.headshot_url) AS headshot_url,
+               r.position, r.points
         FROM sessions sess
         JOIN results r ON r.session_id = sess.id
         JOIN riders  ri ON ri.id = r.rider_id
@@ -2401,7 +2408,8 @@ def compare(
         for r in query(
             """
             SELECT r.id AS rider_id, r.full_name, r.number, r.team,
-                   r.manufacturer, r.headshot_url
+                   r.manufacturer,
+                   COALESCE(r.headshot_override, r.headshot_url) AS headshot_url
             FROM riders r WHERE r.id = ANY(%s)
             """,
             (ids,),
