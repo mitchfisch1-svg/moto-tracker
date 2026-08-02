@@ -93,3 +93,8 @@ iPhone via Expo Go is free.)
 - **Render build fails?** Check the deploy log. Confirm `DATABASE_URL` is set and
   the start command is `uvicorn src.api.main:app --host 0.0.0.0 --port $PORT`.
 - **API 503 on /health?** The database env var is wrong or Neon is unreachable.
+  If the log says *"exceeded the compute time quota"*, the Neon Free plan's 100
+  CU-hours for the month are gone and Neon has suspended the database — the app
+  will hang on its loading skeletons until the quota resets or the project is
+  upgraded. See [docs/db-budget.md](docs/db-budget.md) for what burns the quota
+  and the cron rules that keep us inside it.

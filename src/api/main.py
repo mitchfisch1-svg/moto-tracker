@@ -32,21 +32,108 @@ from ..config import get_database_url
 from ..notify import notify_work
 
 # A small connection pool so requests reuse connections instead of reconnecting.
+#
+# min_size is deliberately 0 and max_idle short: Neon's compute only scales to
+# zero once NOTHING has held a connection for its idle timeout, so a pool that
+# keeps one connection parked forever bills compute 24/7 and drains the monthly
+# CU-hour allowance — at which point Neon suspends the project and every
+# endpoint here answers `503 database unavailable`. An idle API must leave the
+# database completely alone. See docs/db-budget.md.
 _pool: ConnectionPool | None = None
+_POOL_MAX_IDLE_S = 60
+
+
+# --- race-window gate --------------------------------------------------------
+# Both background loops below poll Postgres forever. Off race day that polling
+# is what pins the compute on, so they consult this gate first and stay off the
+# database entirely when there is nothing to push about.
+#
+# The gate itself is cached, because a bare "is anything live?" query is not
+# free either: each one wakes a sleeping compute for a whole idle window. When
+# the next race is days out we re-check in hours, not seconds.
+_WINDOW_PRE_S = 6 * 3600     # window opens 6h before the gate drops
+_WINDOW_POST_S = 9 * 3600    # ... and closes 9h after (matches /live/warm)
+_window_lock = threading.Lock()
+_window_cache: tuple[float, bool] = (0.0, False)   # (recheck_at, open?)
+
+
+def _race_window_open() -> bool:
+    """True while an event is inside its live window.
+
+    One cached query serves both loops. The cache TTL scales with how far away
+    the next event is: seconds-to-minutes near a gate drop, hours when the
+    paddock is empty, so a quiet week costs a handful of queries rather than
+    thousands.
+    """
+    global _window_cache
+    with _window_lock:
+        recheck_at, is_open = _window_cache
+        now = time.time()
+        if now < recheck_at:
+            return is_open
+
+        try:
+            rows = query(
+                """
+                SELECT EXTRACT(EPOCH FROM (start_time_utc - now())) AS delta
+                FROM events
+                WHERE start_time_utc IS NOT NULL
+                  AND start_time_utc > now() - make_interval(secs => %s)
+                ORDER BY start_time_utc
+                LIMIT 1
+                """,
+                (_WINDOW_POST_S,),
+            )
+        except Exception:
+            # Don't let a database blip latch the gate open (which would put the
+            # loops back to hammering it). Assume quiet and retry shortly.
+            _window_cache = (now + 300, False)
+            return False
+
+        if not rows:
+            # No upcoming event at all — off-season. Check back in six hours.
+            _window_cache = (now + 6 * 3600, False)
+            return False
+
+        delta = float(rows[0]["delta"])          # seconds until the gate drops
+        is_open = -_WINDOW_POST_S <= delta <= _WINDOW_PRE_S
+        if is_open:
+            ttl = 300                            # live: recheck every 5 min
+        else:
+            # Wake up a little before the window opens, but never sleep past 6h
+            # so a schedule change can't strand us.
+            ttl = max(300, min(delta - _WINDOW_PRE_S, 6 * 3600))
+        _window_cache = (now + ttl, is_open)
+        return is_open
+
 
 # Push-notification checks run here, in the always-warm API process, every 60s
-# — far faster than the 5-min (often delayed) CI cron, which stays as a backup.
-# An advisory lock inside notify_work() makes overlapping runners harmless.
+# on race day — far faster than the 5-min (often delayed) CI cron, which stays
+# as a backup. An advisory lock inside notify_work() makes overlapping runners
+# harmless. Off race day this backs right off: the only thing waiting is a news
+# alert, which is not worth holding the database open around the clock for.
 _NOTIFY_INTERVAL_S = 60
+# The idle cadence has to be read against the 5-minute scale-to-zero timeout,
+# not against "how stale may a news push be": notify_work() touches Postgres on
+# every tick, so each tick also buys a full idle window behind it. At 15 min
+# that is four wakes an hour — the compute is up ~37% of the time and the month
+# lands near 67 CU-hours, most of the allowance, for an empty paddock. Hourly
+# matches pulse.yml's own pass (offset from it, so between the two a news alert
+# still moves inside ~30 min) and drops that to roughly 16.
+_NOTIFY_IDLE_INTERVAL_S = 3600
 
 
 def _notify_loop():
     while True:
+        # News alerts still go out when the paddock is quiet, just on the slow
+        # cadence — the longer sleep is what lets the compute idle out between
+        # checks instead of being poked every minute all week.
+        live_now = _race_window_open()
         try:
             notify_work()
         except Exception:
             pass   # never let a bad cycle kill the loop
-        time.sleep(_NOTIFY_INTERVAL_S)
+        time.sleep(_NOTIFY_INTERVAL_S if live_now else _NOTIFY_IDLE_INTERVAL_S)
 
 
 # Live Activity loop: while a race window is open, push the running order to
@@ -55,6 +142,9 @@ def _notify_loop():
 # pushes risk Apple's frequent-update budget deferring deliveries (which
 # looks jerkier, not smoother). No-ops without APNs credentials or tokens.
 _LA_INTERVAL_S = 10
+# Off race day the loop just re-asks the (cached) race-window gate, so this
+# interval costs nothing but a wake-up from sleep.
+_LA_IDLE_INTERVAL_S = 300
 
 
 def _la_content_state(payload):
@@ -103,6 +193,13 @@ def _live_activity_loop():
     last_state = None
     last_push = 0.0
     while True:
+        # There is nothing to put on a lock screen when no race is running, so
+        # don't touch the database at all. This loop ticked every 10s around the
+        # clock — ~8,600 queries a day — which on its own was enough to keep the
+        # compute from ever idling out. See docs/db-budget.md.
+        if not _race_window_open():
+            time.sleep(_LA_IDLE_INTERVAL_S)
+            continue
         try:
             if apns_ready():
                 rows = query("SELECT token, kind FROM live_activity_tokens")
@@ -182,8 +279,9 @@ async def lifespan(app: FastAPI):
     global _pool
     _pool = ConnectionPool(
         get_database_url(),
-        min_size=1,
+        min_size=0,             # park nothing: an idle API must let Neon sleep
         max_size=5,
+        max_idle=_POOL_MAX_IDLE_S,
         kwargs={"row_factory": dict_row},
         open=False,
     )

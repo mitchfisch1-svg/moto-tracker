@@ -1,0 +1,49 @@
+name: pulse
+
+# The off-race-day heartbeat: news, results and notifications in ONE job.
+#
+# Why one job instead of three schedules: the Neon compute sleeps after 5 min
+# idle, and every wake-up bills a full idle window. Three workflows on three
+# crons meant three separate wakes for the same few seconds of work. Folding
+# them into a single hourly run does all the work inside one wake, which is what
+# keeps the month inside Neon's free 100 CU-hour quota. Adding another frequent
+# schedule here undoes that — see docs/db-budget.md before changing the cron.
+#
+# Race day is handled separately by results.yml (every 5 min inside the race
+# window), so this cadence only governs quiet periods.
+on:
+  schedule:
+    - cron: "7 * * * *"    # hourly, offset off :00 so it isn't in the cron rush
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: News
+        run: python -m src.scheduler --job news
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      # Catches results that posted after the race window closed (a red-flagged
+      # or rain-delayed round), and keeps event statuses current between races.
+      - name: Results
+        run: python -m src.scheduler --job results
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      # Fire any due push notifications. Last so it sees this run's new news and
+      # results; a failure here shouldn't mask the ingest steps above.
+      - name: Notify
+        run: python -m src.scheduler --job notify
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

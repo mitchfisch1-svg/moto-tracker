@@ -1,11 +1,17 @@
 name: warm
 
 # Keep the race-day session caches warm so the first user tap is instant instead
-# of a cold scrape of the results site. The /live/warm endpoint self-gates to the
-# race window, so off-day runs are a cheap no-op (a single DB check, no scraping).
+# of a cold scrape of the results site.
+#
+# /live/warm self-gates to the race window, but that gate is itself a DB query —
+# so pinging it every 5 min year-round kept the Neon compute from ever idling
+# out and burned the free monthly CU-hour quota. The cron now matches the race
+# window in results.yml instead, which is the only time there are sessions worth
+# warming anyway.
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 min (matches the results-ingest cadence)
+    - cron: "*/5 15-23 * * 6"   # Saturday 15:00-23:59 UTC
+    - cron: "*/5 0-8 * * 0"     # Sunday 00:00-08:59 UTC
   workflow_dispatch:
 
 jobs:

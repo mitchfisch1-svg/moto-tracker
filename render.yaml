@@ -2,14 +2,23 @@
 # In Render: New + -> Blueprint -> connect this repo. Render reads this file.
 # You then set the DATABASE_URL secret in the dashboard (it is NOT in the repo).
 #
-# Free tier note: the service sleeps after ~15 min idle, so the first request
-# after a quiet spell takes ~30-60s to wake. Fine for a personal app; upgrade to
-# a paid instance later for always-on.
+# Instance plan: `starter` ($7/mo) rather than `free`, because a free instance
+# sleeps after ~15 min idle and the first request back takes ~30-60s — which is
+# what the app's "Waking up the server" message is really reporting. Paid
+# instances never spin down.
+#
+# This service is Blueprint-managed, so this file is what Render syncs to. Do
+# not change the plan only in the dashboard: the value here is authoritative and
+# a later sync would put the dashboard change back to whatever is written below.
+#
+# (Note this is a separate bill from the Neon database, and a separate problem —
+# the outage on 2026-07-31 was the database's compute allowance, not this
+# instance. See docs/db-budget.md before assuming a slow app is Render's fault.)
 services:
   - type: web
     name: moto-tracker-api
     runtime: python
-    plan: free
+    plan: starter           # always-on; `free` sleeps after ~15 min idle
     region: virginia            # closest to the Neon us-east-1 database
     buildCommand: pip install -r requirements-api.txt
     startCommand: uvicorn src.api.main:app --host 0.0.0.0 --port $PORT
