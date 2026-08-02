@@ -28,6 +28,13 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python scripts/sync_racerx_headshots.py
+      # Entry lists carry an explicit Bike column, which is the only source that
+      # knows a privateer's make - their team name has no brand in it, and the
+      # live feed only covers riders who are actually on track.
+      - name: Sync bike makes from entry lists
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/sync_entry_bikes.py
       - name: Audit headshots
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
