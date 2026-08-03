@@ -19,6 +19,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.db import get_connection  # noqa: E402
+from src.names import slug_variants  # noqa: E402
 
 BUCKET_API = "https://storage.googleapis.com/storage/v1/b/feld-smx-rider-headshots/o"
 PUBLIC_BASE = "https://storage.googleapis.com/feld-smx-rider-headshots/"
@@ -40,12 +41,6 @@ def list_bucket() -> set[str]:
             return names
 
 
-def slugify(full_name: str) -> str:
-    s = full_name.lower().strip()
-    s = re.sub(r"[^a-z0-9 \-]", "", s)
-    return re.sub(r"\s+", "-", s)
-
-
 def main() -> None:
     objects = list_bucket()
     print(f"Bucket lists {len(objects)} objects.")
@@ -57,11 +52,15 @@ def main() -> None:
 
             matched = 0
             for rid, full_name in riders:
-                slug = slugify(full_name)
                 url = None
-                for ext in ("png", "jpg"):
-                    if f"{slug}.{ext}" in objects:
-                        url = f"{PUBLIC_BASE}{slug}.{ext}"
+                # Try each spelling of the name, not just ours: results give us
+                # "R J Hampshire" while the bucket keys him "rj-hampshire".
+                for slug in slug_variants(full_name):
+                    for ext in ("png", "jpg"):
+                        if f"{slug}.{ext}" in objects:
+                            url = f"{PUBLIC_BASE}{slug}.{ext}"
+                            break
+                    if url:
                         break
                 cur.execute(
                     "UPDATE riders SET headshot_url = %s WHERE id = %s", (url, rid)

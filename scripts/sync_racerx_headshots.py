@@ -28,7 +28,6 @@ import argparse
 import pathlib
 import re
 import sys
-import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -37,6 +36,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.db import get_connection  # noqa: E402
+from src.names import fold, slug_variants  # noqa: E402
 
 RIDER_URL = "https://racerxonline.com/rider/{slug}"
 UA = {"User-Agent": "Mozilla/5.0 (compatible; MotoTracker/1.0; +https://motoxtracker.com)"}
@@ -53,30 +53,6 @@ _OG_IMAGE_RE = re.compile(
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 
 
-def _ascii(text: str) -> str:
-    """Fold accents so 'Jérémy' and 'Jeremy' slug and compare the same."""
-    return "".join(c for c in unicodedata.normalize("NFKD", text)
-                   if not unicodedata.combining(c))
-
-
-def slugify(full_name: str) -> str:
-    s = _ascii(full_name).lower().strip()
-    s = re.sub(r"[^a-z0-9 \-]", "", s)          # drops apostrophes: O'Brien -> obrien
-    return re.sub(r"\s+", "-", s)
-
-
-def slug_variants(full_name: str) -> list[str]:
-    """Racer X is inconsistent about apostrophes and hyphens in surnames."""
-    base = slugify(full_name)
-    variants = [base]
-    apostrophe = re.sub(r"\s+", "-", re.sub(r"[^a-z0-9 \-]", "-",
-                                            _ascii(full_name).lower().strip()))
-    for v in (apostrophe, base.replace("-", "")):
-        if v and v not in variants:
-            variants.append(v)
-    return variants
-
-
 def _name_matches(full_name: str, title: str) -> bool:
     """The page title reads '<Rider Name> Information and Statistics - Racer X'.
 
@@ -84,8 +60,8 @@ def _name_matches(full_name: str, title: str) -> bool:
     uses legal names where results use nicknames often enough that an exact
     match would throw away good photos.
     """
-    want = re.sub(r"[^a-z ]", "", _ascii(full_name).lower()).split()
-    got = re.sub(r"[^a-z ]", "", _ascii(title).lower())
+    want = re.sub(r"[^a-z ]", "", fold(full_name)).split()
+    got = re.sub(r"[^a-z ]", "", fold(title))
     if not want:
         return False
     if want[-1] not in got:                      # surname must appear
