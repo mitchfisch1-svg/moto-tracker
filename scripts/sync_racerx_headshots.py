@@ -1,20 +1,25 @@
-"""Fill headshot gaps from Racer X, where Feld has no photo at all.
+"""Rider headshots from Racer X — now the PREFERRED source, not the fallback.
 
-Feld's bucket (sync_headshots.py) stays the primary source, but it only covers
-70 of 261 riders and — the reason this exists — it has ZERO WMX riders, so the
-entire women's field rendered as faceless number plates. Racer X publishes a
-rider page per athlete whose og:image is a transparent-background cutout on a
-CDN that crops on demand, which is the same visual style as Feld's headshots.
+Racer X publishes a rider page per athlete whose og:image is a
+transparent-background cutout on a CDN that crops on demand. It started as a
+gap-filler because Feld's bucket has ZERO WMX riders, but measuring the two
+made it the better primary outright:
 
-We hotlink, exactly as we do with Feld — nothing is re-hosted.
+    Feld     ~500KB per photo, Cache-Control max-age=3600  (ONE HOUR)
+    Racer X   ~55KB at w=320,  Cache-Control max-age=9331200 (108 DAYS)
 
-    python scripts/sync_racerx_headshots.py --dry-run   # report, write nothing
-    python scripts/sync_racerx_headshots.py             # fill the gaps
-    python scripts/sync_racerx_headshots.py --all       # also riders Feld covers
+That is ~9x smaller and cached for months instead of an hour, which is what
+makes a cold launch show faces instead of number plates — iOS still has the
+images on disk. Feld now only fills gaps Racer X can't.
 
-The API serves COALESCE(headshot_override, headshot_url, headshot_fallback), so
-a manual override still wins, Feld is still preferred, and this only ever shows
-up where there was nothing before.
+We hotlink, exactly as we did with Feld — nothing is re-hosted.
+
+    python scripts/sync_racerx_headshots.py --dry-run    # report, write nothing
+    python scripts/sync_racerx_headshots.py             # every rider
+    python scripts/sync_racerx_headshots.py --gaps-only # skip riders Feld covers
+
+The API serves COALESCE(headshot_override, headshot_racerx, headshot_url), so a
+manual override still wins and Feld still covers anyone Racer X lacks.
 
 Three ways this could put the WRONG face on a rider, all guarded:
   * a slug that isn't a rider -> Racer X 404s, no og:image (verified)
@@ -44,9 +49,11 @@ UA = {"User-Agent": "Mozilla/5.0 (compatible; MotoTracker/1.0; +https://motoxtra
 # Racer X serves a generic post thumbnail for riders it has no photo of.
 PLACEHOLDER = "i/logos/post_thumb.png"
 
-# The CDN crops on request. Feld's headshots are square, so ask for the same
-# shape and let it centre on the face rather than the 1200x630 social card.
-CROP = "?w=700&h=700&fit=crop&crop=faces"
+# The CDN crops on request, so ask for the size we actually draw rather than
+# the 1200x630 social card. The largest use in the app is the recap-story
+# avatar at 92pt = 276px on a 3x screen, so 320 covers every surface with
+# headroom — and costs 55KB instead of 197KB at w=700.
+CROP = "?w=320&h=320&fit=crop&crop=faces"
 
 _OG_IMAGE_RE = re.compile(
     r'<meta[^>]+property=["\']og:image["\'][^>]*content=["\']([^"\']+)', re.I)
@@ -104,24 +111,24 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would change, write nothing")
-    ap.add_argument("--all", action="store_true",
-                    help="also sync riders who already have a Feld headshot")
+    ap.add_argument("--gaps-only", action="store_true",
+                    help="only riders with no Feld photo (pre-2026-08 behaviour)")
     args = ap.parse_args()
 
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("ALTER TABLE riders ADD COLUMN IF NOT EXISTS "
-                        "headshot_fallback TEXT")
+                        "headshot_racerx TEXT")
             conn.commit()
 
             sql = "SELECT id, full_name FROM riders"
-            if not args.all:
+            if args.gaps_only:
                 sql += " WHERE headshot_url IS NULL"
             sql += " ORDER BY full_name"
             cur.execute(sql)
             riders = cur.fetchall()
 
-        scope = "all riders" if args.all else "riders with no Feld headshot"
+        scope = "riders with no Feld headshot" if args.gaps_only else "riders"
         print(f"checking {len(riders)} {scope} against Racer X\n")
 
         with ThreadPoolExecutor(max_workers=6) as ex:
@@ -135,7 +142,7 @@ def main():
                     # Only ever write a hit. A transient network failure must not
                     # wipe a fallback we already had.
                     if url:
-                        cur.execute("UPDATE riders SET headshot_fallback = %s "
+                        cur.execute("UPDATE riders SET headshot_racerx = %s "
                                     "WHERE id = %s", (url, rid))
             conn.commit()
 

@@ -182,14 +182,18 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS tickets_url TEXT;
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS manufacturer TEXT;
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS hometown TEXT;
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_url TEXT;
--- Headshot escape hatches, in the order the API prefers them:
+-- Headshot sources, in the order the API prefers them:
 --   headshot_override  a URL pinned by hand (scripts/audit_headshots.py --set)
---   headshot_url       Feld's bucket, the source of truth (sync_headshots.py)
---   headshot_fallback  Racer X, which covers riders Feld never shot — notably
---                      the entire WMX field (scripts/sync_racerx_headshots.py)
+--   headshot_racerx    Racer X (scripts/sync_racerx_headshots.py) — PREFERRED
+--   headshot_url       Feld's bucket (sync_headshots.py), fills what Racer X lacks
 -- Every API headshot query serves COALESCE of the three in that order.
+--
+-- Racer X leads on measurement, not preference: ~55KB at w=320 with
+-- Cache-Control max-age=9331200 (108 days), against Feld's ~500KB at
+-- max-age=3600 (one hour). Feld's photos fell out of the iOS cache hourly and
+-- were big enough that a cold launch showed number plates instead of faces.
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_override TEXT;
-ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_fallback TEXT;
+ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_racerx TEXT;
 -- Last-Modified of the Feld image + when we last asked, so audit_headshots.py
 -- can flag riders whose photo predates their team change (= last season's kit).
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_source_mtime TIMESTAMPTZ;
