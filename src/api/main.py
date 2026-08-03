@@ -827,6 +827,10 @@ def rider(rider_id: int):
         """,
         [rider_id],
     )
+    # WMX points live on the series-points page, not in our standings table, so
+    # a WMX rider would otherwise show no championship at all — and the app
+    # gates its "Compare head-to-head" button on having one.
+    standings_rows = standings_rows + _wmx_standing_lines(rider_id)
     return {
         "rider": info[0],
         "season_stats": stats[0] if stats else None,
@@ -1646,6 +1650,38 @@ def _wmx_standings():
     return rows
 
 
+def _wmx_row_for(rider_id: int):
+    """This rider's row in the scraped WMX standings, or None.
+
+    Best-effort on purpose: WMX points come off an external page, so a scrape
+    failure must degrade to "no WMX championship" rather than break a rider
+    page or a head-to-head.
+    """
+    if not rider_id:
+        return None
+    try:
+        for row in _wmx_standings():
+            if row.get("rider_id") == rider_id:
+                return row
+    except Exception:
+        pass
+    return None
+
+
+def _wmx_standing_lines(rider_id: int) -> list[dict]:
+    """WMX shaped like a /riders/{id} standings entry (so the app needs no
+    special case: class chips, the compare button and the opponent picker all
+    read this same shape)."""
+    row = _wmx_row_for(rider_id)
+    if not row:
+        return []
+    return [{
+        "series": "MX", "class": "WMX", "position": row.get("position"),
+        "points": row.get("points"), "wins": row.get("wins"),
+        "podiums": row.get("podiums"), "gap": row.get("gap"),
+    }]
+
+
 @app.get("/live/entries/{event_id}/{class_id}")
 def live_entries(event_id: int, class_id: int):
     """Entry list for one class of the current event — who's racing today."""
@@ -2432,6 +2468,17 @@ def compare(
         riders[st["rider_id"]].update(
             position=st["position"], points=st["points"],
             wins=st["wins"], podiums=st["podiums"])
+
+    # WMX isn't in the standings table (scraped series-points page instead), so
+    # the moto-by-moto half below already worked while both riders' championship
+    # lines came back null. Fill them from the same source /standings uses.
+    if (klass or "").upper() == "WMX":
+        for rid in ids:
+            row = _wmx_row_for(rid)
+            if row:
+                riders[rid].update(
+                    position=row.get("position"), points=row.get("points"),
+                    wins=row.get("wins"), podiums=row.get("podiums"))
 
     rows = query(
         """
