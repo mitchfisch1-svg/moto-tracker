@@ -661,10 +661,36 @@ def manufacturer_standings(series: str, year: int | None = None):
 
 
 # --- news ------------------------------------------------------------------
+# Some feeds don't write a summary at all — they emit WordPress's syndication
+# footer, "The post <headline> appeared first on <site>." (sometimes behind a
+# sponsor tag). That's a third of everything we ingest, and shown as an article
+# preview it reads like the app is broken, so strip it and let the caller treat
+# the article as preview-less rather than print filler.
+_FEED_BOILERPLATE_RE = re.compile(
+    r"\s*The post\b.*?\bappeared first on\b.*?(?:\.|$)", re.I | re.S)
+_MIN_SUMMARY_CHARS = 40
+
+
+def _clean_summary(text):
+    """A publisher's own blurb, or None when all they sent was boilerplate."""
+    if not text:
+        return None
+    out = _FEED_BOILERPLATE_RE.sub(" ", text)
+    out = re.sub(r"\s+", " ", out).strip(" -–—|·")
+    return out if len(out) >= _MIN_SUMMARY_CHARS else None
+
+
+def _news_rows(sql, params):
+    rows = query(sql, params)
+    for r in rows:
+        r["summary"] = _clean_summary(r.get("summary"))
+    return rows
+
+
 @app.get("/news")
 def news(limit: int = Query(20, le=100), source: str | None = None):
     sql = """
-        SELECT a.title, a.url, a.summary, a.author, a.published_at,
+        SELECT a.id, a.title, a.url, a.summary, a.author, a.published_at,
                src.name AS source
         FROM news_articles a
         LEFT JOIN sources src ON src.id = a.source_id
@@ -676,7 +702,26 @@ def news(limit: int = Query(20, le=100), source: str | None = None):
         params.append(f"%{source}%")
     sql += " ORDER BY a.published_at DESC NULLS LAST LIMIT %s"
     params.append(limit)
-    return query(sql, params)
+    return _news_rows(sql, params)
+
+
+@app.get("/news/article/{article_id}")
+def news_article(article_id: int):
+    """One story, so a notification tap can open it in-app without the app
+    having to find it in a list it may not have loaded."""
+    rows = _news_rows(
+        """
+        SELECT a.id, a.title, a.url, a.summary, a.author, a.published_at,
+               src.name AS source
+        FROM news_articles a
+        LEFT JOIN sources src ON src.id = a.source_id
+        WHERE a.id = %s
+        """,
+        [article_id],
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="article not found")
+    return rows[0]
 
 
 # Words that mark a headline as a big deal (wins, injuries, silly season…).

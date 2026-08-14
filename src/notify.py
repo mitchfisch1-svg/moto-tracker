@@ -235,14 +235,15 @@ def _rider_news(cur):
         if matched:
             tokens = _tokens_following(cur, matched, 'news')
             if tokens:
-                # url is what the app routes on — it opens the story itself
-                # instead of dropping you on the home screen.
+                # article_id opens the story INSIDE the app (newer builds);
+                # url is the fallback for builds that only know how to hand
+                # off to the browser. Both are ignored by anything older.
                 # Deliberately NO rider_id here: builds already in the wild
                 # route on rider_id alone, so adding it would silently start
                 # sending live users to a rider page on every news tap.
                 send_push(tokens, f"📰 {names[matched[0]]}",
                           title or "New story",
-                          {"type": "news", "url": url})
+                          {"type": "news", "article_id": aid, "url": url})
         _mark(cur, key)
 
 
