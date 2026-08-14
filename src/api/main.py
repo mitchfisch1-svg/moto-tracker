@@ -742,7 +742,7 @@ def news_top(limit: int = Query(3, le=6)):
     """
     arts = query(
         """
-        SELECT a.title, a.url, a.summary, a.published_at, src.name AS source
+        SELECT a.id, a.title, a.url, a.summary, a.published_at, src.name AS source
         FROM news_articles a
         LEFT JOIN sources src ON src.id = a.source_id
         WHERE COALESCE(a.published_at, a.fetched_at) >= now() - interval '48 hours'
@@ -787,12 +787,12 @@ def news_top(limit: int = Query(3, le=6)):
         if key in seen_titles:
             continue
         seen_titles.add(key)
-        summary = re.sub(r"<[^>]+>", "", a["summary"] or "")
-        summary = re.sub(r"\s+", " ", summary).strip()
-        # RSS boilerplate ("The post X appeared first on Y.") isn't a summary.
-        if re.match(r"^The post .{0,140}appeared first on", summary):
-            summary = ""
+        # Same cleaner as /news, so a story reads identically here and on its
+        # own screen. The old check here only caught boilerplate at the very
+        # start, so Swapmoto's "Presented by <sponsor> The post…" slipped past.
+        summary = _clean_summary(re.sub(r"<[^>]+>", "", a["summary"] or "")) or ""
         out.append({
+            "id": a["id"],
             "title": a["title"],
             "summary": summary[:280] + ("…" if len(summary) > 280 else ""),
             "source": a["source"],
