@@ -166,6 +166,10 @@ def _gate_drop(cur):
             "🟢 Race starting soon",
             f"{_SERIES_LONG.get(abbrev, abbrev)} {venue} — gate drop in "
             f"~{int(mins)} min{providers}",
+            # Without a payload the app has nothing to route on and the tap
+            # just lands on Standings. 'gate' opens Race Day, which is the
+            # whole point of a gate-drop alert.
+            {"type": "gate"},
         )
         _mark(cur, key)
 
@@ -231,8 +235,14 @@ def _rider_news(cur):
         if matched:
             tokens = _tokens_following(cur, matched, 'news')
             if tokens:
+                # url is what the app routes on — it opens the story itself
+                # instead of dropping you on the home screen.
+                # Deliberately NO rider_id here: builds already in the wild
+                # route on rider_id alone, so adding it would silently start
+                # sending live users to a rider page on every news tap.
                 send_push(tokens, f"📰 {names[matched[0]]}",
-                          title or "New story", {"url": url})
+                          title or "New story",
+                          {"type": "news", "url": url})
         _mark(cur, key)
 
 
