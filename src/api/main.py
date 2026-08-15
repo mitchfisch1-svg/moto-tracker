@@ -10,6 +10,7 @@ then open http://127.0.0.1:8000/docs
 
 import datetime
 import json
+import logging
 import re
 import threading
 import time
@@ -30,6 +31,8 @@ from psycopg_pool import ConnectionPool
 from ..apns import apns_ready, send_live_activity
 from ..config import get_database_url
 from ..notify import notify_work
+
+log = logging.getLogger("moto.api")
 
 # A small connection pool so requests reuse connections instead of reconnecting.
 #
@@ -132,7 +135,7 @@ def _notify_loop():
         try:
             notify_work()
         except Exception:
-            pass   # never let a bad cycle kill the loop
+            log.exception("notify: cycle failed")   # never let it kill the loop
         time.sleep(_NOTIFY_INTERVAL_S if live_now else _NOTIFY_IDLE_INTERVAL_S)
 
 
@@ -147,24 +150,61 @@ _LA_INTERVAL_S = 10
 _LA_IDLE_INTERVAL_S = 300
 
 
+# The feed's FlagType is an int enum and only 6 (checkered) is confirmed — see
+# docs/live-timing-api.md. Anything else stays blank rather than printing a bare
+# enum number on someone's lock screen; the race name already carries the state.
+_LA_FLAGS = {6: "checkered"}
+
+
+def _la_flag(raw):
+    """FlagType -> short display string. ALWAYS returns a string.
+
+    This used to be `(clock.get("flag") or "")[:12]`, which only survived because
+    a staged grid reports flag 0/None. The moment the green flag flew the feed
+    started sending a non-zero int, slicing it raised TypeError, and the blanket
+    handler in _live_activity_loop swallowed it — so every lock screen froze on
+    the last staged push for the rest of the moto.
+    """
+    if raw is None or raw == "":
+        return ""
+    if isinstance(raw, bool):
+        return ""
+    if isinstance(raw, (int, float)):
+        return _LA_FLAGS.get(int(raw), "")
+    return str(raw)[:12]
+
+
+def _la_names(rows):
+    """Last names for the card, with a first initial only where they'd collide.
+
+    Two Lawrences on the same podium rendered as "Lawrence" and "Lawrence"; the
+    bike number was the only thing telling them apart.
+    """
+    last = [(r.get("name") or "").split(" ")[-1] for r in rows]
+    out = []
+    for r, ln in zip(rows, last):
+        first = (r.get("name") or "").split(" ")[0]
+        out.append(f"{first[0]}. {ln}" if last.count(ln) > 1 and first else ln)
+    return out
+
+
 def _la_content_state(payload):
     t = payload.get("timing") or {}
     state = t.get("race_state") or "racing"
     # During qualifying the lock screen should show the same class-wide best-lap
     # board the app and the broadcast show, not one group's running order.
     cq = t.get("combined_qualifying")
-    if cq:
-        riders = [
-            {"p": r.get("position"), "n": (r.get("name") or "").split(" ")[-1],
-             "num": str(r.get("number") or ""), "g": (r.get("best_lap") or "")[:12]}
-            for r in (cq.get("riders") or [])[:5]
-        ]
-    else:
-        riders = [
-            {"p": r.get("position"), "n": (r.get("name") or "").split(" ")[-1],
-             "num": str(r.get("number") or ""), "g": (r.get("gap") or "")[:12]}
-            for r in (t.get("riders") or [])[:5]
-        ]
+    src = (cq.get("riders") if cq else t.get("riders")) or []
+    src = src[:5]
+    # Qualifying ranks on best lap; a race ranks on gap to the leader. Both are
+    # pre-formatted display strings by the time they reach here, but coerce
+    # anyway — a raw number from the feed must never crash the whole loop again.
+    detail_key = "best_lap" if cq else "gap"
+    riders = [
+        {"p": r.get("position"), "n": n, "num": str(r.get("number") or ""),
+         "g": str(r.get(detail_key) or "")[:12]}
+        for r, n in zip(src, _la_names(src))
+    ]
     clock = t.get("clock") or {}
     remaining = clock.get("remaining")
     # The widget has no state field, so carry the status in the title it already
@@ -179,7 +219,7 @@ def _la_content_state(payload):
         "race": name[:40],
         "venue": ((payload.get("event") or {}).get("venue") or "")[:28],
         "riders": riders,
-        "flag": (clock.get("flag") or "")[:12],
+        "flag": _la_flag(clock.get("flag")),
         # A staged grid has a full clock that isn't counting down yet — showing it
         # made the lock screen look like a race was already running.
         "remaining": (int(remaining)
@@ -188,9 +228,30 @@ def _la_content_state(payload):
     }
 
 
+def _la_signature(state):
+    """What counts as a change worth spending Apple's update budget on.
+
+    Deliberately excludes `remaining` and the gap strings. Both move on every
+    single tick once a race is green, so comparing whole content-states marked
+    every 10s push as "changed" and the budget went out at 6/min for a 30-minute
+    moto — exactly the throttling the dedupe was added to avoid. Order and
+    identity drive pushes; gaps and the clock ride along on the heartbeat.
+    """
+    return (
+        state.get("race"), state.get("venue"), state.get("flag"),
+        tuple((r.get("p"), r.get("n"), r.get("num"))
+              for r in (state.get("riders") or [])),
+    )
+
+
+# Refresh gaps and the clock at least this often even when the order hasn't
+# moved, so the card doesn't sit on a visibly stale gap mid-moto.
+_LA_HEARTBEAT_S = 30
+
+
 def _live_activity_loop():
     import httpx
-    last_state = None
+    last_sig = None
     last_push = 0.0
     while True:
         # There is nothing to put on a lock screen when no race is running, so
@@ -212,11 +273,12 @@ def _live_activity_loop():
                         # how the lock screen ended up frozen mid-session. Only
                         # spend budget when something actually changed (with a
                         # heartbeat so a quiet session can't look abandoned).
-                        changed = state != last_state
-                        if not changed and (time.time() - last_push) < 120:
+                        sig = _la_signature(state)
+                        if (sig == last_sig
+                                and (time.time() - last_push) < _LA_HEARTBEAT_S):
                             time.sleep(_LA_INTERVAL_S)
                             continue
-                        last_state, last_push = state, time.time()
+                        last_sig, last_push = sig, time.time()
                         stale = []
                         # Once per event: remotely launch the activity on every
                         # phone that registered a push-to-start token (iOS 17.2+)
@@ -229,6 +291,7 @@ def _live_activity_loop():
                                 started = conn.execute(
                                     "SELECT 1 FROM push_sent WHERE key = %s",
                                     (start_key,)).fetchone() is not None
+                        sent, failed = 0, {}
                         with httpx.Client(http2=True, timeout=15) as client:
                             for row in rows:
                                 if row["kind"] == "start" and not started:
@@ -238,9 +301,23 @@ def _live_activity_loop():
                                     continue
                                 ok, reason = send_live_activity(
                                     row["token"], "update", state, client=client)
+                                if ok:
+                                    sent += 1
+                                else:
+                                    failed[reason] = failed.get(reason, 0) + 1
                                 if reason in ("BadDeviceToken", "Unregistered",
                                               "ExpiredToken"):
                                     stale.append(row["token"])
+                        # APNs rejections were previously discarded, so a session
+                        # spent entirely un-pushable looked identical to a healthy
+                        # one in the logs. Say so.
+                        if failed:
+                            log.warning("live-activity: %s sent, %s failed (%s) — %s",
+                                        sent, sum(failed.values()), failed,
+                                        state.get("race"))
+                        else:
+                            log.info("live-activity: %s sent — %s",
+                                     sent, state.get("race"))
                         if start_key and not started:
                             with _pool.connection() as conn:
                                 conn.execute(
@@ -270,7 +347,10 @@ def _live_activity_loop():
                                     "DELETE FROM live_activity_tokens "
                                     "WHERE token = ANY(%s)", (upd,))
         except Exception:
-            pass   # next tick retries
+            # Keep retrying, but never silently: this handler sat on a TypeError
+            # every 10s for a whole moto while the lock screen stayed frozen, and
+            # nothing anywhere said so.
+            log.exception("live-activity: tick failed")
         time.sleep(_LA_INTERVAL_S)
 
 
