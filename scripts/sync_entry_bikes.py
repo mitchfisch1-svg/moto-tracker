@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.adapters.results_html import manufacturer_from_team  # noqa: E402
 from src.db import get_connection  # noqa: E402
+from src.resolve.riders import normalize_name  # noqa: E402
 
 BASE = "https://racerxonline.com"
 # Entry-list links are discovered from these rather than guessing venue slugs,
@@ -149,7 +150,11 @@ def main():
         for name, _num, bike in entries:
             make = manufacturer_from_team(bike)
             if make:
-                makes[name.strip().lower()] = make
+                # Match on the pipeline's own canonical key, not a bare
+                # lowercase string. Entry lists write "R.J. Hampshire" where
+                # results give us "R J Hampshire"; both normalise to
+                # "R J HAMPSHIRE", so he stops reading as an unknown rider.
+                makes[normalize_name(name)] = make
             else:
                 unparsed.add(bike)
     print(f"\n{len(makes)} riders with a readable bike across all entry lists")
@@ -162,7 +167,7 @@ def main():
             cur.execute("SELECT id, full_name FROM riders WHERE manufacturer IS NULL")
             missing = cur.fetchall()
             for rid, full_name in missing:
-                make = makes.get(full_name.strip().lower())
+                make = makes.get(normalize_name(full_name))
                 if not make:
                     continue
                 filled.append((full_name, make))

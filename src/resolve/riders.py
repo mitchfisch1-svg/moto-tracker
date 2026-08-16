@@ -19,6 +19,8 @@ import re
 
 from rapidfuzz import fuzz, process
 
+from ..names import fold
+
 # Fuzzy score thresholds (0-100, RapidFuzz WRatio).
 HIGH_CONFIDENCE = 90   # >= this: treat as the same rider
 LOW_CONFIDENCE = 75    # below this: treat as a brand-new rider
@@ -28,10 +30,18 @@ _TAG_RE = re.compile(r"\b(HOLESHOT|HOLE SHOT)\b", re.I)
 
 
 def normalize_name(raw: str) -> str:
-    """Canonical form used for matching: upper-case, de-tagged, punctuation-light."""
+    """Canonical form used for MATCHING: upper-case, de-tagged, punctuation-light.
+
+    Accents are folded rather than blanked (fold() maps ø->o, é->e, æ->ae), so a
+    sheet spelling "TONDEL" still matches a rider stored as "Tøndel". Before
+    that, the regex below turned every non-A-Z letter into a space and the two
+    spellings could never meet.
+
+    This is a matching key, not something to store — see display_name.
+    """
     if not raw:
         return ""
-    s = raw.upper()
+    s = fold(raw).upper()
     s = _TAG_RE.sub(" ", s)
     s = re.sub(r"[^A-Z0-9'\- ]", " ", s)  # keep letters, digits, apostrophe, hyphen
     s = re.sub(r"\s+", " ", s).strip()
@@ -39,8 +49,22 @@ def normalize_name(raw: str) -> str:
 
 
 def display_name(raw: str) -> str:
-    """Readable stored form, e.g. 'HUNTER LAWRENCE Holeshot' -> 'Hunter Lawrence'."""
-    return normalize_name(raw).title()
+    """Readable stored form, e.g. 'HUNTER LAWRENCE Holeshot' -> 'Hunter Lawrence'.
+
+    Deliberately does NOT go through normalize_name. That maps anything outside
+    A-Z to a space, so building the stored name from it wrote "Cornelius Tøndel"
+    into the database as "Cornelius T Ndel" — the rider's own name, destroyed by
+    a transformation only ever meant for matching.
+
+    Case is only imposed when the source shouted it (results sheets are all
+    caps); a source that already capitalised properly is left alone rather than
+    having "McGrath" flattened to "Mcgrath".
+    """
+    if not raw:
+        return ""
+    s = _TAG_RE.sub(" ", raw)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.title() if s == s.upper() else s
 
 
 class RiderResolver:
