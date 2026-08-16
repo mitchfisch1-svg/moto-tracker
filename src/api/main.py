@@ -180,6 +180,56 @@ _NOTIFY_INTERVAL_S = 60
 _NOTIFY_IDLE_INTERVAL_S = 3600
 
 
+# Which sessions are worth a "they're on the gate" push. Motos and mains are
+# the ones people stop what they're doing for; qualifying and heats run all
+# morning and would turn the alert into noise nobody trusts.
+_GATE_ALERT_RE = re.compile(r"\b(moto|main)\b", re.I)
+
+
+def _moto_gate_alerts():
+    """Alert on EVERY moto's gate, not just the first of the day.
+
+    The scheduled gate-drop alert fires once per event off the calendar, so a
+    four-moto afternoon got a single heads-up before the first one and nothing
+    before the 450s that people actually wait around for. The timing feed
+    already tells us when a grid is staged — that's the gate, and it's the only
+    signal that survives a rain delay or a red flag reshuffling the program.
+    """
+    try:
+        payload = live()
+    except Exception:
+        return
+    if not payload.get("live"):
+        return
+    timing = payload.get("timing") or {}
+    if timing.get("race_state") != "staged":
+        return                      # only the moment on the gate
+    race = (timing.get("race_name") or "").strip()
+    if not race or not _GATE_ALERT_RE.search(race):
+        return
+    ev = payload.get("event") or {}
+    eid = ev.get("event_id")
+    # Keyed by session, so each moto alerts once — and a red flag that re-stages
+    # the same race doesn't fire a second time.
+    key = f"gatemoto:{eid}:{race.lower()}"
+    try:
+        from ..notify import _all_tokens, _mark, _seen, send_push
+        with _pool.connection() as conn:
+            with conn.cursor() as cur:
+                if _seen(cur, key):
+                    return
+                tokens = _all_tokens(cur, 'gate')
+                _mark(cur, key)
+        if tokens:
+            venue = ev.get("venue") or ""
+            send_push(tokens, "🟢 On the gate",
+                      f"{race} is lining up at {venue}." if venue
+                      else f"{race} is lining up.",
+                      {"type": "gate"})
+    except Exception:
+        pass   # never let an alert failure disturb the loop
+
+
 def _notify_loop():
     while True:
         # News alerts still go out when the paddock is quiet, just on the slow
@@ -190,6 +240,10 @@ def _notify_loop():
             notify_work()
         except Exception:
             pass   # never let a bad cycle kill the loop
+        if live_now:
+            # Per-moto gate alerts read the live feed, so they only make sense
+            # (and only cost anything) while a race window is open.
+            _moto_gate_alerts()
         time.sleep(_NOTIFY_INTERVAL_S if live_now else _NOTIFY_IDLE_INTERVAL_S)
 
 
