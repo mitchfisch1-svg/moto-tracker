@@ -65,6 +65,11 @@ def update_event_statuses(conn) -> int:
             FROM seasons se, series s
             WHERE e.season_id = se.id AND se.series_id = s.id
               AND e.start_time_utc IS NOT NULL
+              -- A round that has been retired stays retired. /live marks an
+              -- event final the moment its last race is done; without this the
+              -- next tick would compute 'live' again from the clock window and
+              -- put it straight back on the Next Race widget.
+              AND e.status <> 'final'
             """,
             (MX_PROGRAM_LEAD_HOURS, EVENT_WINDOW_HOURS),
         )

@@ -652,6 +652,10 @@ def next_events(series: str | None = None, limit: int = Query(3, le=20)):
         JOIN seasons se ON se.id = e.season_id
         JOIN series  s  ON s.id  = se.series_id
         WHERE e.event_date >= CURRENT_DATE
+          -- Racing's finished, so stop calling it the next race. Without this
+          -- the Next Race widget sat on "Unadilla - RACE DAY" all evening,
+          -- because the round is still "today" for hours after the checkered.
+          AND e.status <> 'final'
     """
     params = []
     if series:
@@ -1392,6 +1396,19 @@ def live(demo: bool = False):
             timing.get("race_name"), ev.get("series")):
         first = _DAY_DONE_AT.setdefault(ev["event_id"], time.monotonic())
         if time.monotonic() - first >= _DAY_DONE_GRACE_S:
+            # Make it durable. day_complete lives in a per-process dict, so a
+            # restart forgets it — and everything downstream (the Next Race
+            # widget, /schedule/next) keys off status, not this in-memory flag.
+            # Writing 'final' here retires the round the moment racing ends
+            # rather than hours later when the clock window happens to close.
+            try:
+                with _pool.connection() as conn:
+                    conn.execute(
+                        "UPDATE events SET status = 'final' "
+                        "WHERE id = %s AND status <> 'final'",
+                        (ev["event_id"],))
+            except Exception:
+                pass   # cosmetic; the timed window still retires it later
             nxt = next_events(limit=1)
             # Carry the final race's running order out with the day-complete
             # flag. The lock screen's last frame should be the RESULT, not a
