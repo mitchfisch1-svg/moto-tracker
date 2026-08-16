@@ -57,6 +57,63 @@ _window_lock = threading.Lock()
 _window_cache: tuple[float, bool] = (0.0, False)   # (recheck_at, open?)
 
 
+# How long before the gate drops a round's PROGRAM actually starts. Pro
+# Motocross moved WMX to a two-day format in 2026 — Moto 1 on Friday, Moto 2
+# on Saturday with everyone else — so a Saturday-only window had the app
+# showing a countdown while a moto was on track (Unadilla, 2026-08-14).
+# Supercross and the SMX playoffs still run in a single day.
+_PROGRAM_LEAD_H = {"MX": 30}
+_DEFAULT_PROGRAM_LEAD_H = 4
+_MAX_PROGRAM_LEAD_H = max([_DEFAULT_PROGRAM_LEAD_H, *_PROGRAM_LEAD_H.values()])
+
+_SMX_ID_RE = re.compile(r"[?&]id=(\d+)")
+
+
+def _event_smx_id(source_url):
+    m = _SMX_ID_RE.search(source_url or "")
+    return m.group(1) if m else None
+
+
+def _sessions_smx_id(payload):
+    """Which event the results site is currently showing, by its smx id."""
+    for e in (payload or {}).get("entry_lists") or []:
+        if e.get("event_id"):
+            return str(e["event_id"])
+    for url in ((payload or {}).get("track_map") or {}).values():
+        m = re.search(r"/event_files/\d+/(\d+)/", url or "")
+        if m:
+            return m.group(1)
+    return None
+
+
+def _program_under_way(ev) -> bool:
+    """True once this round is genuinely on track.
+
+    Inside the normal window (gate drop minus a few hours) we trust the
+    schedule. Earlier than that — the extra day the two-day format opens up —
+    we only believe it if the results site is listing THIS round's sessions,
+    which is the one signal that reflects what's actually happening.
+    """
+    start = ev.get("start_time_utc")
+    lead_h = _PROGRAM_LEAD_H.get(ev.get("series"), _DEFAULT_PROGRAM_LEAD_H)
+    if lead_h == _DEFAULT_PROGRAM_LEAD_H or start is None:
+        return True
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if now >= start - datetime.timedelta(hours=_DEFAULT_PROGRAM_LEAD_H):
+        return True          # normal window — schedule is enough
+    try:
+        payload = live_sessions()
+    except Exception:
+        return False         # can't confirm; don't claim live
+    if not (payload or {}).get("sessions"):
+        return False
+    ours = _event_smx_id(ev.get("source_url"))
+    theirs = _sessions_smx_id(payload)
+    # Before the round has a results id of its own, the site showing a live
+    # event name is still better evidence than the schedule alone.
+    return bool(theirs) and (ours is None or ours == theirs)
+
+
 def _race_window_open() -> bool:
     """True while an event is inside its live window.
 
@@ -1154,12 +1211,20 @@ def live(demo: bool = False):
         JOIN seasons se ON se.id = e.season_id
         JOIN series  s  ON s.id  = se.series_id
         WHERE e.start_time_utc IS NOT NULL
-          AND now() >= e.start_time_utc - interval '4 hours'
+          AND now() >= e.start_time_utc - make_interval(hours => %s)
           AND now() <= e.start_time_utc + interval '6 hours'
         ORDER BY e.start_time_utc
         LIMIT 1
-        """
+        """,
+        (_MAX_PROGRAM_LEAD_H,),
     )
+    # A round can start the day before its gate drop, so the query above casts
+    # a wide net and this narrows it: anything earlier than the scheduled start
+    # only counts as live once the results site actually shows the round's
+    # sessions. Without that check the app would claim LIVE from Friday
+    # breakfast onwards and render the previous round's stale feed.
+    if rows and not _program_under_way(rows[0]):
+        rows = []
     is_demo = False
     if not rows and demo:
         # Replay the latest completed round (its timing JSON stays up on S3).
@@ -1781,14 +1846,18 @@ def warm_sessions():
     parallel; already-cached sessions return immediately, so repeated pings only
     pay for new sessions (or a re-warm after a server restart).
     """
+    # Warming is cheap and idempotent, so this uses the widest program lead
+    # without the on-track check /live needs — warming a Friday that turns out
+    # to be quiet just re-caches the same session list.
     live = query(
         """
         SELECT 1 FROM events
         WHERE start_time_utc IS NOT NULL
-          AND now() >= start_time_utc - interval '6 hours'
+          AND now() >= start_time_utc - make_interval(hours => %s)
           AND now() <= start_time_utc + interval '9 hours'
         LIMIT 1
-        """
+        """,
+        (_MAX_PROGRAM_LEAD_H,),
     )
     if not live:
         return {"live": False, "warmed": 0, "total": 0}

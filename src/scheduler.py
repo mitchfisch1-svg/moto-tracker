@@ -38,6 +38,12 @@ log = logging.getLogger("moto.scheduler")
 
 # How long an event is considered "live" after its start time.
 EVENT_WINDOW_HOURS = 6
+# Pro Motocross runs a two-day program in 2026 — WMX Moto 1 on Friday, Moto 2
+# on Saturday with the rest of the card — so an MX round is already under way
+# the day before its gate drop. Without this the Friday sessions never ingest:
+# the event still reads 'scheduled', and only 'live'/'final' events are picked
+# up. Keep in step with _PROGRAM_LEAD_H in src/api/main.py.
+MX_PROGRAM_LEAD_HOURS = 30
 
 
 def update_event_statuses(conn) -> int:
@@ -45,18 +51,22 @@ def update_event_statuses(conn) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
-            UPDATE events SET
+            UPDATE events e SET
                 status = CASE
-                    WHEN start_time_utc IS NULL THEN status
-                    WHEN now() < start_time_utc THEN 'scheduled'
-                    WHEN now() <= start_time_utc + make_interval(hours => %s)
+                    WHEN e.start_time_utc IS NULL THEN e.status
+                    WHEN now() < e.start_time_utc - make_interval(hours => (
+                        CASE WHEN s.abbrev = 'MX' THEN %s ELSE 0 END))
+                        THEN 'scheduled'
+                    WHEN now() <= e.start_time_utc + make_interval(hours => %s)
                         THEN 'live'
                     ELSE 'final'
                 END,
                 updated_at = now()
-            WHERE start_time_utc IS NOT NULL
+            FROM seasons se, series s
+            WHERE e.season_id = se.id AND se.series_id = s.id
+              AND e.start_time_utc IS NOT NULL
             """,
-            (EVENT_WINDOW_HOURS,),
+            (MX_PROGRAM_LEAD_HOURS, EVENT_WINDOW_HOURS),
         )
         cur.execute("SELECT count(*) FROM events WHERE status = 'live'")
         return cur.fetchone()[0]

@@ -10,6 +10,7 @@ name: warm
 # warming anyway.
 on:
   schedule:
+    - cron: "*/5 16-23 * * 5"   # Friday 16:00-23:59 UTC - MX runs WMX Moto 1 on Friday
     - cron: "*/5 13-23 * * 6"   # Saturday 13:00-23:59 UTC (9am ET, when /live opens)
     - cron: "*/5 0-8 * * 0"     # Sunday 00:00-08:59 UTC
   workflow_dispatch:
