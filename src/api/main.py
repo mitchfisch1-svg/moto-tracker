@@ -132,11 +132,14 @@ def _race_window_open() -> bool:
         try:
             rows = query(
                 """
-                SELECT EXTRACT(EPOCH FROM (start_time_utc - now())) AS delta
-                FROM events
-                WHERE start_time_utc IS NOT NULL
-                  AND start_time_utc > now() - make_interval(secs => %s)
-                ORDER BY start_time_utc
+                SELECT EXTRACT(EPOCH FROM (e.start_time_utc - now())) AS delta,
+                       s.abbrev AS series, e.start_time_utc, e.source_url
+                FROM events e
+                JOIN seasons se ON se.id = e.season_id
+                JOIN series  s  ON s.id  = se.series_id
+                WHERE e.start_time_utc IS NOT NULL
+                  AND e.start_time_utc > now() - make_interval(secs => %s)
+                ORDER BY e.start_time_utc
                 LIMIT 1
                 """,
                 (_WINDOW_POST_S,),
@@ -152,13 +155,36 @@ def _race_window_open() -> bool:
             _window_cache = (now + 6 * 3600, False)
             return False
 
-        delta = float(rows[0]["delta"])          # seconds until the gate drops
+        ev = rows[0]
+        delta = float(ev["delta"])               # seconds until the gate drops
         is_open = -_WINDOW_POST_S <= delta <= _WINDOW_PRE_S
+
+        # A two-day round is already racing the day before its gate drop, and
+        # these loops are what make gate alerts and the lock screen prompt — on
+        # the hourly fallback a Friday alert can land 50 minutes late.
+        #
+        # Deliberately NOT just a wider pre-window: that would hold the loops at
+        # race cadence through a quiet Friday morning, and pinning the compute
+        # for a day it isn't needed is exactly what blew the database quota in
+        # July. So open early ONLY once the results site shows this round's
+        # sessions — the same check /live uses.
+        # Only series that actually run a second day get considered early —
+        # _program_under_way answers True for single-day series by design, so
+        # without this guard the loops would wake 30h before every supercross.
+        lead_s = _PROGRAM_LEAD_H.get(ev["series"], _DEFAULT_PROGRAM_LEAD_H) * 3600
+        two_day = lead_s > _DEFAULT_PROGRAM_LEAD_H * 3600
+        if (not is_open and two_day and 0 < delta <= lead_s
+                and _program_under_way(ev)):
+            is_open = True
+
         if is_open:
             ttl = 300                            # live: recheck every 5 min
+        elif two_day and delta <= lead_s:
+            # Quiet for now, but this round can start racing before the normal
+            # window opens, so keep looking every 10 min rather than sleeping
+            # through to the gate drop.
+            ttl = 600
         else:
-            # Wake up a little before the window opens, but never sleep past 6h
-            # so a schedule change can't strand us.
             ttl = max(300, min(delta - _WINDOW_PRE_S, 6 * 3600))
         _window_cache = (now + ttl, is_open)
         return is_open

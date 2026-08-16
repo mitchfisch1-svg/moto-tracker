@@ -1,0 +1,25 @@
+name: tests
+
+# Race-day logic only runs a few hours a week, so a regression can sit unnoticed
+# until it's live in front of people. These tests need no database and no
+# secrets — they're pure functions over hand-built feed payloads — so they can
+# run on every push for nothing.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # requirements-api.txt, not the full pipeline set: the tests import
+      # src/api/main.py and nothing heavier.
+      - run: pip install -r requirements-api.txt pytest
+      - run: python -m pytest tests/ -q
