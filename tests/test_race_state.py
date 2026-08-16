@@ -24,6 +24,7 @@ from src.api.main import (  # noqa: E402
     _is_final_race_of_day,
     _race_finished,
     _race_started,
+    _site_shows_this_round,
 )
 
 
@@ -144,3 +145,46 @@ def test_motos_and_mains_get_a_gate_alert(name):
 def test_qualifying_and_heats_do_not(name):
     """These run all morning. Alerting on them trains people to ignore the app."""
     assert not _GATE_ALERT_RE.search(name)
+
+
+# --- is the results site showing THIS round, or last week's? -----------------
+#
+# A two-day round opens its window 30h early, which puts the Friday decision on
+# one signal: the program the results site is serving. The trap is that the site
+# keeps the PREVIOUS round up until the new one goes on track, and a round has
+# no results id of its own until race morning.
+
+FINISHED = {"512368", "513129"}          # Washougal, Unadilla
+
+
+def test_a_round_we_have_already_closed_is_a_stale_page():
+    """Budds Creek has no id of its own yet, and on Friday morning the site was
+    still serving Unadilla — which we ingested and closed days earlier. Reading
+    that as "the round is under way" put a LIVE screen full of last week's
+    results on the app, and woke the 60s push loops for a day of empty compute."""
+    assert _site_shows_this_round(None, "513129", FINISHED) is False
+
+
+def test_an_unknown_id_means_the_site_has_moved_on():
+    """The moment the site publishes a program we've never ingested, that IS the
+    new round starting — this is what has to keep working, or Friday goes dark."""
+    assert _site_shows_this_round(None, "513500", FINISHED) is True
+
+
+def test_our_own_id_still_wins_once_we_have_it():
+    assert _site_shows_this_round("513500", "513500", FINISHED) is True
+
+
+def test_our_id_against_someone_else_s_program_is_not_us():
+    assert _site_shows_this_round("513500", "513129", FINISHED) is False
+
+
+def test_an_empty_site_is_never_evidence_of_racing():
+    assert _site_shows_this_round(None, None, FINISHED) is False
+    assert _site_shows_this_round("513500", None, FINISHED) is False
+
+
+def test_no_finished_rounds_yet_does_not_block_the_opener():
+    """Round 1 of a season: nothing is closed out, so any program the site
+    serves is genuinely new."""
+    assert _site_shows_this_round(None, "487830", set()) is True

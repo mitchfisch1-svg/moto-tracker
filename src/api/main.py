@@ -86,6 +86,38 @@ def _sessions_smx_id(payload):
     return None
 
 
+def _finished_smx_ids() -> set:
+    """Results-site ids for the rounds we've already ingested and closed out."""
+    try:
+        rows = query(
+            "SELECT source_url FROM events "
+            "WHERE status = 'final' AND source_url IS NOT NULL"
+        )
+    except Exception:
+        # Without this list we can't tell a stale program from a live one, so
+        # the caller's "don't claim live" default is the safe answer.
+        return set()
+    return {i for i in (_event_smx_id(r["source_url"]) for r in rows) if i}
+
+
+def _site_shows_this_round(ours, theirs, finished_ids) -> bool:
+    """Is the program the results site is serving actually THIS round's?
+
+    `ours` is the round's own results id, which the site frequently doesn't
+    publish until race morning; `theirs` is the id it is serving right now.
+    """
+    if not theirs:
+        return False
+    if ours:
+        return ours == theirs
+    # We don't know this round's id yet, so we can't match on it. The results
+    # homepage keeps serving the PREVIOUS round until the next one goes on
+    # track — four days after Unadilla it was still listing all 25 of its
+    # sessions — so an id we have already ingested and closed is evidence of a
+    # stale page, not of this round starting.
+    return theirs not in finished_ids
+
+
 def _program_under_way(ev) -> bool:
     """True once this round is genuinely on track.
 
@@ -109,9 +141,7 @@ def _program_under_way(ev) -> bool:
         return False
     ours = _event_smx_id(ev.get("source_url"))
     theirs = _sessions_smx_id(payload)
-    # Before the round has a results id of its own, the site showing a live
-    # event name is still better evidence than the schedule alone.
-    return bool(theirs) and (ours is None or ours == theirs)
+    return _site_shows_this_round(ours, theirs, _finished_smx_ids())
 
 
 def _race_window_open() -> bool:
