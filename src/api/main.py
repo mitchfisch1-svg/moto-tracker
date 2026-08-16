@@ -198,6 +198,17 @@ def _notify_loop():
 # floor: the timing feed itself refreshes ~every 5-10s, and sustained faster
 # pushes risk Apple's frequent-update budget deferring deliveries (which
 # looks jerkier, not smoother). No-ops without APNs credentials or tokens.
+# How long a pushed card stays "current" before iOS greys it as outdated. This
+# is the safety net for a card we can't reach: an activity launched by
+# push-to-start onto a locked phone carries no update token until the app runs,
+# so if the owner never opens it we can neither refresh nor end it. At Unadilla
+# one sat on a lock screen reading "450 Moto #2 · on the gate" hours after the
+# program finished. Better a visibly stale card than a confidently wrong one.
+_LA_STALE_S = 900
+# ...and once the day is done, how long the final result stays up before iOS
+# clears it on its own.
+_LA_RESULT_HOLD_S = 3600
+
 _LA_INTERVAL_S = 10
 # Off race day the loop just re-asks the (cached) race-window gate, so this
 # interval costs nothing but a wake-up from sleep.
@@ -245,6 +256,28 @@ def _la_content_state(payload):
     }
 
 
+def _la_final_state(payload):
+    """The card's closing frame: the last race's result, explicitly final.
+
+    Falls back to a plain "racing's done" card if the day-complete payload
+    somehow arrives without timing, so the activity always ends on something
+    coherent rather than whatever was frozen there.
+    """
+    timing = payload.get("timing")
+    if timing:
+        state = _la_content_state(payload)
+        # Build the label off the RAW race name, not the one _la_content_state
+        # already decorated — otherwise a session the feed still calls staged
+        # ends up reading "450 Moto #2 · on the gate · final".
+        raw = (timing.get("race_name") or "Racing")[:32]
+        state["race"] = f"{raw} · final"
+        state["remaining"] = None
+        return state
+    venue = (payload.get("event") or {}).get("venue") or ""
+    return {"race": "Racing complete", "venue": venue[:28],
+            "riders": [], "flag": None, "remaining": None}
+
+
 def _live_activity_loop():
     import httpx
     last_state = None
@@ -290,11 +323,13 @@ def _live_activity_loop():
                             for row in rows:
                                 if row["kind"] == "start" and not started:
                                     send_live_activity(
-                                        row["token"], "start", state, client=client)
+                                        row["token"], "start", state, client=client,
+                                        stale_after_s=_LA_STALE_S)
                                 if row["kind"] != "update":
                                     continue
                                 ok, reason = send_live_activity(
-                                    row["token"], "update", state, client=client)
+                                    row["token"], "update", state, client=client,
+                                    stale_after_s=_LA_STALE_S)
                                 if reason in ("BadDeviceToken", "Unregistered",
                                               "ExpiredToken"):
                                     stale.append(row["token"])
@@ -309,19 +344,27 @@ def _live_activity_loop():
                                     "DELETE FROM live_activity_tokens "
                                     "WHERE token = ANY(%s)", (stale,))
                     elif not payload.get("live"):
-                        # Race window closed: end every activity immediately so
-                        # nothing lingers on lock screens/Dynamic Island, and
-                        # forget the tokens (fresh ones register next race day).
+                        # Racing's over. End every activity and forget the tokens
+                        # (fresh ones register next race day).
+                        #
+                        # When the DAY is done we leave the finish up for an hour
+                        # rather than blanking it — that last frame is the result
+                        # people want, and iOS clears it on its own afterwards, so
+                        # nothing depends on us pushing again. Any other reason for
+                        # going not-live (window closed, feed gone) clears at once.
+                        done = payload.get("day_complete")
+                        final = _la_final_state(payload) if done else {
+                            "race": "Session complete", "venue": None,
+                            "riders": [], "flag": None, "remaining": None,
+                        }
+                        hold = _LA_RESULT_HOLD_S if done else 0
                         upd = [r["token"] for r in rows if r["kind"] == "update"]
                         if upd:
                             with httpx.Client(http2=True, timeout=15) as client:
                                 for t in upd:
                                     send_live_activity(
-                                        t, "end",
-                                        {"race": "Session complete", "venue": None,
-                                         "riders": [], "flag": None,
-                                         "remaining": None},
-                                        client=client)
+                                        t, "end", final, client=client,
+                                        dismiss_after_s=hold)
                             with _pool.connection() as conn:
                                 conn.execute(
                                     "DELETE FROM live_activity_tokens "
@@ -1350,7 +1393,12 @@ def live(demo: bool = False):
         first = _DAY_DONE_AT.setdefault(ev["event_id"], time.monotonic())
         if time.monotonic() - first >= _DAY_DONE_GRACE_S:
             nxt = next_events(limit=1)
+            # Carry the final race's running order out with the day-complete
+            # flag. The lock screen's last frame should be the RESULT, not a
+            # blank card or whatever it happened to be showing when we stopped
+            # pushing. Consumers gate on `live`, so this can't read as running.
             return {"live": False, "day_complete": True, "event": ev,
+                    "timing": timing,
                     "next_event": nxt[0] if nxt else None}
     else:
         _DAY_DONE_AT.pop(ev.get("event_id"), None)

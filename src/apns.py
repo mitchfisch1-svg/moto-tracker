@@ -60,8 +60,20 @@ def _auth_token():
 
 
 def send_live_activity(token: str, event: str, content_state: dict,
-                       alert: dict | None = None, client=None):
+                       alert: dict | None = None, client=None,
+                       stale_after_s: int | None = None,
+                       dismiss_after_s: int = 0):
     """Send one Live Activity push. event: 'update' | 'end' | 'start'.
+
+    stale_after_s marks the content outdated N seconds from now, so iOS greys
+    the card down by itself. That matters because a card we can no longer reach
+    is otherwise indistinguishable from a live one: an activity launched by
+    push-to-start onto a locked phone has no update token until the app runs,
+    so if the owner never opens it we can neither refresh nor end the thing.
+    Never let the lock screen present stale timing as current.
+
+    dismiss_after_s (with event='end') keeps the final state visible for N
+    seconds before iOS removes it — 0 clears it immediately.
 
     Returns (ok, reason). reason 'BadDeviceToken'/'Unregistered' means the
     token is stale and should be pruned.
@@ -70,17 +82,18 @@ def send_live_activity(token: str, event: str, content_state: dict,
     if not auth:
         return False, "not configured"
     import httpx
+    now = int(time.time())
     payload = {
         "aps": {
-            "timestamp": int(time.time()),
+            "timestamp": now,
             "event": event,
             "content-state": content_state,
         }
     }
+    if stale_after_s:
+        payload["aps"]["stale-date"] = now + int(stale_after_s)
     if event == "end":
-        # Remove from the lock screen immediately instead of Apple's default
-        # of leaving the final state visible for up to 4 hours.
-        payload["aps"]["dismissal-date"] = int(time.time())
+        payload["aps"]["dismissal-date"] = now + int(dismiss_after_s)
     if event == "start":
         payload["aps"]["attributes-type"] = "MXTRaceAttributes"
         payload["aps"]["attributes"] = {}
