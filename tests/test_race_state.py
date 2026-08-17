@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.api.main import (  # noqa: E402
     _GATE_ALERT_RE,
+    _gate_alert_key,
     _is_final_race_of_day,
     _race_finished,
     _race_started,
@@ -188,3 +189,42 @@ def test_no_finished_rounds_yet_does_not_block_the_opener():
     """Round 1 of a season: nothing is closed out, so any program the site
     serves is genuinely new."""
     assert _site_shows_this_round(None, "487830", set()) is True
+
+
+# --- one gate alert per moto, per day ----------------------------------------
+#
+# The event id comes from the schedule and the race name from the timing feed,
+# so the two can disagree. The day in the key bounds the damage.
+
+def test_the_same_moto_alerts_once_a_day():
+    """A red flag re-stages the grid; the second staging must stay quiet."""
+    a = _gate_alert_key(27, "450 Moto #2", "2026-08-22")
+    b = _gate_alert_key(27, "450 Moto #2", "2026-08-22")
+    assert a == b
+
+
+def test_friday_cannot_suppress_saturday_on_a_two_day_round():
+    """Budds Creek is ONE event id across both days. Before the day was in the
+    key, anything firing on Friday — including off a stale feed — silently ate
+    the real alert for the same race name on Saturday."""
+    friday = _gate_alert_key(27, "450 Moto #2", "2026-08-21")
+    saturday = _gate_alert_key(27, "450 Moto #2", "2026-08-22")
+    assert friday != saturday
+
+
+def test_each_moto_of_the_day_gets_its_own_key():
+    day = "2026-08-22"
+    keys = {_gate_alert_key(27, n, day) for n in
+            ["250 Moto #1", "450 Moto #1", "250 Moto #2", "450 Moto #2"]}
+    assert len(keys) == 4
+
+
+def test_the_race_name_is_normalised():
+    """The feed's spacing/case shouldn't mint a second key for one race."""
+    assert (_gate_alert_key(27, "  450 Moto #2  ", "2026-08-22")
+            == _gate_alert_key(27, "450 MOTO #2", "2026-08-22"))
+
+
+def test_two_rounds_never_share_a_key():
+    assert (_gate_alert_key(27, "450 Moto #2", "2026-08-22")
+            != _gate_alert_key(28, "450 Moto #2", "2026-08-22"))

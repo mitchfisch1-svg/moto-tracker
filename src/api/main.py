@@ -10,6 +10,7 @@ then open http://127.0.0.1:8000/docs
 
 import datetime
 import json
+import logging
 import re
 import threading
 import time
@@ -30,6 +31,8 @@ from psycopg_pool import ConnectionPool
 from ..apns import apns_ready, send_live_activity
 from ..config import get_database_url
 from ..notify import notify_work
+
+log = logging.getLogger("moto.api")
 
 # A small connection pool so requests reuse connections instead of reconnecting.
 #
@@ -242,6 +245,22 @@ _NOTIFY_IDLE_INTERVAL_S = 3600
 _GATE_ALERT_RE = re.compile(r"\b(moto|main)\b", re.I)
 
 
+def _gate_alert_key(eid, race, day):
+    """Ledger key for one moto's gate alert.
+
+    Scoped to the calendar day as well as the event, because a two-day round is
+    ONE event id covering both days: without the day, anything that fires on
+    Friday sits in the same namespace as Saturday's program and silently
+    suppresses the real alert for a race of the same name. The race name comes
+    from the timing feed while the id comes from the schedule, so the two can
+    disagree — the day bounds how long any such disagreement can do damage.
+
+    The day is Eastern, not UTC: a supercross night race runs past 00:00 UTC and
+    would otherwise change key mid-programme, re-alerting on a red-flag restage.
+    """
+    return f"gatemoto:{eid}:{day}:{(race or '').strip().lower()}"
+
+
 def _moto_gate_alerts():
     """Alert on EVERY moto's gate, not just the first of the day.
 
@@ -267,7 +286,8 @@ def _moto_gate_alerts():
     eid = ev.get("event_id")
     # Keyed by session, so each moto alerts once — and a red flag that re-stages
     # the same race doesn't fire a second time.
-    key = f"gatemoto:{eid}:{race.lower()}"
+    key = _gate_alert_key(eid, race,
+                          datetime.datetime.now(_EASTERN).date().isoformat())
     try:
         from ..notify import _all_tokens, _mark, _seen, send_push
         with _pool.connection() as conn:
@@ -287,19 +307,34 @@ def _moto_gate_alerts():
 
 
 def _notify_loop():
+    """Every notification the app sends comes from this one thread.
+
+    So each step is isolated: an exception that escapes here kills the thread
+    outright, and nothing restarts it short of a redeploy — no gate alerts, no
+    news, silently, for the life of the process. A whole race weekend can go by
+    before anyone notices, which is why the failures are logged rather than
+    swallowed, and why the window check is inside the guard too.
+    """
     while True:
-        # News alerts still go out when the paddock is quiet, just on the slow
-        # cadence — the longer sleep is what lets the compute idle out between
-        # checks instead of being poked every minute all week.
-        live_now = _race_window_open()
+        live_now = False
+        try:
+            live_now = _race_window_open()
+        except Exception:
+            log.exception("notify: race-window check failed")
         try:
             notify_work()
         except Exception:
-            pass   # never let a bad cycle kill the loop
+            log.exception("notify: trigger pass failed")
         if live_now:
             # Per-moto gate alerts read the live feed, so they only make sense
             # (and only cost anything) while a race window is open.
-            _moto_gate_alerts()
+            try:
+                _moto_gate_alerts()
+            except Exception:
+                log.exception("notify: gate alerts failed")
+        # News alerts still go out when the paddock is quiet, just on the slow
+        # cadence — the longer sleep is what lets the compute idle out between
+        # checks instead of being poked every minute all week.
         time.sleep(_NOTIFY_INTERVAL_S if live_now else _NOTIFY_IDLE_INTERVAL_S)
 
 
@@ -397,7 +432,17 @@ def _live_activity_loop():
         # don't touch the database at all. This loop ticked every 10s around the
         # clock — ~8,600 queries a day — which on its own was enough to keep the
         # compute from ever idling out. See docs/db-budget.md.
-        if not _race_window_open():
+        #
+        # Guarded because this call sits outside the body's own handler: if it
+        # ever raised, the thread died and every lock screen froze on whatever
+        # frame it last received, until a redeploy. That is indistinguishable
+        # from the stale-card bug this loop exists to prevent.
+        try:
+            window_open = _race_window_open()
+        except Exception:
+            log.exception("live-activity: race-window check failed")
+            window_open = False
+        if not window_open:
             time.sleep(_LA_IDLE_INTERVAL_S)
             continue
         try:
@@ -480,7 +525,7 @@ def _live_activity_loop():
                                     "DELETE FROM live_activity_tokens "
                                     "WHERE token = ANY(%s)", (upd,))
         except Exception:
-            pass   # next tick retries
+            log.exception("live-activity: push cycle failed")   # next tick retries
         time.sleep(_LA_INTERVAL_S)
 
 
