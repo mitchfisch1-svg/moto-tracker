@@ -20,8 +20,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.api.main import (  # noqa: E402
-    _GATE_ALERT_RE,
     _gate_alert_key,
+    _gate_alert_worthy,
     _is_final_race_of_day,
     _race_finished,
     _race_started,
@@ -133,19 +133,50 @@ def test_unknown_series_never_closes_the_day():
 
 
 # --- which sessions are worth waking someone up for? -------------------------
+#
+# Names below are the real ones off the feed (verified against Unadilla's
+# 25-session programme), not invented shapes.
 
-@pytest.mark.parametrize("name", ["450 Moto #2", "250 Moto #1",
-                                  "450 Main Event", "WMX Moto #1"])
-def test_motos_and_mains_get_a_gate_alert(name):
-    assert _GATE_ALERT_RE.search(name)
+@pytest.mark.parametrize("name", ["450 Moto #1", "450 Moto #2",
+                                  "250 Moto #1", "250 Moto #2",
+                                  "450 Main Event", "250 Main"])
+def test_every_points_race_gets_a_gate_alert(name):
+    """Both motos score in each class, so both are worth rearranging an
+    afternoon for — and a main is a class's whole night."""
+    assert _gate_alert_worthy(name) is True
 
 
 @pytest.mark.parametrize("name", ["250 Group A Qualifying 1",
+                                  "450 Group B Qualifying 2",
                                   "450 Combined Qualifying Results",
-                                  "250 Heat #2", "450 LCQ"])
-def test_qualifying_and_heats_do_not(name):
-    """These run all morning. Alerting on them trains people to ignore the app."""
-    assert not _GATE_ALERT_RE.search(name)
+                                  "250 Heat #2", "450 LCQ",
+                                  "450 Overall Results"])
+def test_qualifying_heats_and_overalls_do_not(name):
+    """These run all morning, or land after the racing. Alerting on them trains
+    people to ignore the app, which costs you the alerts that do matter."""
+    assert _gate_alert_worthy(name) is False
+
+
+def test_only_the_closing_wmx_moto_alerts():
+    """WMX splits across the two days — Moto 1 Friday, Moto 2 Saturday. Only
+    the closer earns a push."""
+    assert _gate_alert_worthy("WMX Moto #2") is True
+    assert _gate_alert_worthy("WMX Moto #1") is False
+
+
+@pytest.mark.parametrize("name", ["WMX Practice", "WMX Qualifying 1",
+                                  "WMX Qualifying 2",
+                                  "WMX Combined Qualifying Results",
+                                  "WMX Overall Results"])
+def test_the_rest_of_the_wmx_programme_stays_quiet(name):
+    assert _gate_alert_worthy(name) is False
+
+
+def test_a_missing_race_name_never_alerts():
+    """The feed goes blank between sessions; that must not read as a gate."""
+    assert _gate_alert_worthy(None) is False
+    assert _gate_alert_worthy("") is False
+    assert _gate_alert_worthy("   ") is False
 
 
 # --- is the results site showing THIS round, or last week's? -----------------

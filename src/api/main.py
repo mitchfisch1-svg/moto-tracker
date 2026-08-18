@@ -240,9 +240,33 @@ _NOTIFY_IDLE_INTERVAL_S = 3600
 
 
 # Which sessions are worth a "they're on the gate" push. Motos and mains are
-# the ones people stop what they're doing for; qualifying and heats run all
-# morning and would turn the alert into noise nobody trusts.
+# the ones people stop what they're doing for; qualifying, combined qualifying,
+# heats, LCQs and the Overall standings run all morning (or after the fact) and
+# would turn the alert into noise nobody trusts.
 _GATE_ALERT_RE = re.compile(r"\b(moto|main)\b", re.I)
+# WMX runs its two motos across the two days — Moto 1 on Friday, Moto 2 on
+# Saturday. Only the closer earns an interruption; Friday's opener does not.
+_WMX_RE = re.compile(r"\bwmx\b", re.I)
+_WMX_FINAL_MOTO_RE = re.compile(r"\bwmx\b.*?\bmoto\b\D*?2\b", re.I)
+
+
+def _gate_alert_worthy(race) -> bool:
+    """Does this session earn a push as its grid stages?
+
+    Points races only: both 250/450 motos (each scores) and the mains, plus the
+    FINAL WMX moto. Everything else in a race day — practice, qualifying,
+    combined qualifying, heats, LCQs, the Overall — is either not a race or not
+    one anybody rearranges their afternoon for.
+
+    ⚠️ A single-moto WMX showcase (the SMX Final runs one) won't match, because
+    "final" here means Moto 2. Revisit if that round should alert.
+    """
+    name = (race or "").strip()
+    if not _GATE_ALERT_RE.search(name):
+        return False
+    if _WMX_RE.search(name):
+        return bool(_WMX_FINAL_MOTO_RE.search(name))
+    return True
 
 
 def _gate_alert_key(eid, race, day):
@@ -280,7 +304,7 @@ def _moto_gate_alerts():
     if timing.get("race_state") != "staged":
         return                      # only the moment on the gate
     race = (timing.get("race_name") or "").strip()
-    if not race or not _GATE_ALERT_RE.search(race):
+    if not _gate_alert_worthy(race):
         return
     ev = payload.get("event") or {}
     eid = ev.get("event_id")
