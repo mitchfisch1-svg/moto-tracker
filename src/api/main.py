@@ -2599,17 +2599,37 @@ def event(event_id: int):
 # copyright problem entirely — this is the publishers' own content, in their own
 # player, with their ads intact.
 #
-# Two exclusions worth remembering so nobody "helpfully" re-adds them: the
-# @vitalmx handle resolves to "Vital MTB" (mountain biking, not moto), and
-# Swapmoto Live's channel (UCvOh-WOBvelVw2akcAdjyMQ) serves a valid but EMPTY
-# feed — 0 entries. A dead channel degrades gracefully here, it's just a wasted
-# request every cycle.
+# Exclusions, every one VERIFIED by resolving the handle and reading the feed.
+# Don't "helpfully" re-add them:
+#   @vitalmx        -> "Vital MTB". Mountain biking, not moto.
+#   @dirtshark      -> Monster Energy's GENERAL channel. Of 15 recent uploads,
+#                      most were UFC, NASCAR, skateboarding and BMX; only a few
+#                      were moto. It would bury the feed in other sports.
+#   @TheDeeganShow  -> Brian Deegan's lifestyle vlog (skiing, fishing, golf,
+#                      hospital visits), titled with bare dates, last upload
+#                      months old. The moto Deegan channel is @deegan38,
+#                      "The Deegans", which IS included below.
+#   Resolve fine but serve ZERO entries: Swapmoto Live
+#                      (UCvOh-WOBvelVw2akcAdjyMQ), Ken Roczen, Hunter Lawrence,
+#                      Filthy Phil. A channel page existing proves nothing —
+#                      always check the RSS actually has <entry> blocks.
+#   Dormant: Jett Lawrence (last upload 2023), MotocrossActionMag (2013),
+#                      @haidendeegan38 (2024 — the family channel is the live one).
+#
+# `category` rides along to the app so a feed of race reports and a feed of
+# rider vlogs can be told apart:
+#   "coverage" — the official series feeds and the moto press
+#   "riders"   — riders', families' and teams' own channels: vlogs, training,
+#                behind the gate. The fun stuff, not the reporting.
 _YT_CHANNELS = [
-    ("SuperMotocross", "UCcAjWBbd4aO4AhoovRKNbag"),   # official SX/SMX
-    ("Pro Motocross",  "UCKtQ4DDoVusEa1i_Q8OEyew"),   # official MX
-    ("Racer X",        "UCzLDrufzDTIQX_F20r0EiMA"),
-    ("PulpMX",         "UCpMfM2f4b6ehg1H_olAx02Q"),
-    ("Gypsy Tales",    "UCsBGR5UR7UCyLvNbHSxisFQ"),
+    ("SuperMotocross", "UCcAjWBbd4aO4AhoovRKNbag", "coverage"),  # official SX/SMX
+    ("Pro Motocross",  "UCKtQ4DDoVusEa1i_Q8OEyew", "coverage"),  # official MX
+    ("Racer X",        "UCzLDrufzDTIQX_F20r0EiMA", "coverage"),
+    ("PulpMX",         "UCpMfM2f4b6ehg1H_olAx02Q", "coverage"),
+    ("Gypsy Tales",    "UCsBGR5UR7UCyLvNbHSxisFQ", "coverage"),
+    ("The Deegans",    "UCYkwcqwLUXZu3aJ7VO5VONg", "riders"),    # @deegan38
+    ("Cooper Webb",    "UCUKbW-YuZql6kJJGwILlN8Q", "riders"),    # @CooperWebb2
+    ("ClubMX",         "UCxcECIOXyo_0imPDHqvfvmQ", "riders"),    # the training barn
 ]
 _YT_RSS = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
 _VIDEOS_TTL = 900            # uploads aren't frequent; 15 min is plenty
@@ -2621,7 +2641,7 @@ _YT_TITLE_RE = re.compile(r"<title>(.*?)</title>", re.S)
 _YT_PUB_RE = re.compile(r"<published>(.*?)</published>")
 
 
-def _yt_channel_videos(name: str, channel_id: str):
+def _yt_channel_videos(name: str, channel_id: str, category: str = "coverage"):
     """Latest uploads for one channel. Never raises — one dead channel must not
     empty the whole feed."""
     from html import unescape
@@ -2639,6 +2659,7 @@ def _yt_channel_videos(name: str, channel_id: str):
                 "video_id": vid_id,
                 "title": unescape(title.group(1)).strip(),
                 "channel": name,
+                "category": category,
                 "published_at": pub.group(1) if pub else None,
                 "thumbnail": f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg",
                 "url": f"https://www.youtube.com/watch?v={vid_id}",
@@ -2655,8 +2676,9 @@ def videos(limit: int = 40):
     if hit and hit[0] > time.time():
         return hit[1][:limit]
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futs = [ex.submit(_yt_channel_videos, n, c) for n, c in _YT_CHANNELS]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futs = [ex.submit(_yt_channel_videos, n, c, cat)
+                for n, c, cat in _YT_CHANNELS]
         items = [v for f in futs for v in f.result()]
 
     if items:
