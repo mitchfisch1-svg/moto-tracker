@@ -23,6 +23,15 @@ import requests
 API = "https://moto-tracker-api.onrender.com"
 TIMEOUT = 30
 
+# Windows hands you a cp1252 stdout the moment output is redirected to a file or
+# piped, and this prints RIDER NAMES straight off the feed — a single "Tøndel"
+# would otherwise kill the check mid-race with a UnicodeEncodeError. Degrade the
+# character rather than the tool.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):      # pragma: no cover - very old Pythons
+    pass
+
 OK, WARN, BAD, INFO = "OK  ", "WARN", "BAD ", "    "
 _problems = []
 
@@ -156,12 +165,14 @@ def main():
     except requests.RequestException as e:
         say(BAD, f"could not reach the API: {e}")
 
+    # Plain ASCII: this is the line you read at a glance on a phone-tethered
+    # laptop at a racetrack, and it must survive any terminal.
     print("\n== verdict ==")
     if _problems:
         for p in _problems:
-            print(f"  ✗ {p}")
+            print(f"  PROBLEM: {p}")
         return 1
-    print("  ✓ nothing looks wrong")
+    print("  ALL CLEAR - nothing looks wrong")
     return 0
 
 
