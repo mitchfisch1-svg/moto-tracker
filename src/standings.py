@@ -12,13 +12,41 @@ Points come only from the championship-scoring sessions:
 # Standard AMA points table (position -> points), positions 1..20.
 # This is the long-standing Pro Motocross / Supercross table. If any series
 # uses a different value, adjust here — standings recompute from results.
-_AMA_POINTS = {
-    1: 25, 2: 22, 3: 20, 4: 18, 5: 16, 6: 15, 7: 14, 8: 13, 9: 12, 10: 11,
-    11: 10, 12: 9, 13: 8, 14: 7, 15: 6, 16: 5, 17: 4, 18: 3, 19: 2, 20: 1,
+# The points a finishing position is worth.
+#
+# This is NOT the classic AMA table (25-22-20-18-16-15-14-...-1 for the top 20)
+# that this file used to carry. The real one goes flat 25/22/20/18 for the
+# podium-plus-one and then simply pays 22 minus your position all the way down
+# to 21st, which still earns a point. The difference is invisible at the front —
+# a race winner scores 25 either way — and grows as you go back, which is why a
+# wrong table looked almost right: after nine rounds the leader was 2 points off
+# while the midfield was 16 short, and the order of 6th and 7th was reversed.
+#
+# Derived from, and checked against, the official standings the timing provider
+# publishes at ?p=view_series_points. Recomputing every stored result with this
+# table reproduces the official total for **every rider** in MX 450 (88), MX 250
+# (95) and SX 450 (34) — the only remaining differences are the official
+# POINT ADJUSTMENTS column (see below).
+#
+# 5th is the giveaway: 17, not 16. Unadilla 450 Overall, Garrett Marchbanks
+# went 5-4 for an official 35 — the old table said 34.
+_SMX_POINTS = {
+    1: 25, 2: 22, 3: 20, 4: 18,
+    5: 17, 6: 16, 7: 15, 8: 14, 9: 13, 10: 12,
+    11: 11, 12: 10, 13: 9, 14: 8, 15: 7, 16: 6, 17: 5, 18: 4, 19: 3, 20: 2,
+    21: 1,          # 21st still scores; 22nd and back score nothing
 }
 
-# Per-series tables (all the same today; kept separate so they're easy to tweak).
-POINTS_TABLES = {"SX": _AMA_POINTS, "MX": _AMA_POINTS, "SMX": _AMA_POINTS}
+# All three series score identically — verified against the official SX 450 and
+# Pro Motocross standings, not assumed. Kept per-series so a divergence is a
+# one-line change.
+POINTS_TABLES = {"SX": _SMX_POINTS, "MX": _SMX_POINTS, "SMX": _SMX_POINTS}
+
+# ⚠️ NOT MODELLED: the official standings carry a POINT ADJUSTMENTS column —
+# manual penalties that cannot be derived from finishing positions (e.g. Michael
+# Mosiman -5 in MX 250, Jorge Prado -3 in SX 450). Ten riders across the three
+# championships are affected. Everyone else matches exactly. The fix, if it ever
+# matters, is to ingest ?p=view_series_points directly rather than compute.
 
 # Session types that award championship points.
 SCORING_TYPES = ("main", "moto")
@@ -27,7 +55,7 @@ SCORING_TYPES = ("main", "moto")
 def points_for(series_abbrev: str, position) -> int:
     if not position:
         return 0
-    table = POINTS_TABLES.get(series_abbrev, _AMA_POINTS)
+    table = POINTS_TABLES.get(series_abbrev, _SMX_POINTS)
     return table.get(int(position), 0)
 
 
