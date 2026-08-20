@@ -7,11 +7,13 @@ results, so it can never drift — re-run it any time results change.
 Points come only from the championship-scoring sessions:
   - Supercross: the Main Event
   - Pro Motocross: each Moto (both motos count, summed)
+
+`apply_official_standings()` then overlays the series' own published points on
+top, because the provider applies manual penalties we cannot derive.
 """
 
-# Standard AMA points table (position -> points), positions 1..20.
-# This is the long-standing Pro Motocross / Supercross table. If any series
-# uses a different value, adjust here — standings recompute from results.
+import re
+
 # The points a finishing position is worth.
 #
 # This is NOT the classic AMA table (25-22-20-18-16-15-14-...-1 for the top 20)
@@ -148,3 +150,105 @@ def recompute_standings(conn, season_id: int | None = None) -> int:
             )
 
     return len(agg)
+
+
+def _rider_index(conn):
+    """match_key -> rider_id, from riders and their aliases.
+
+    Ambiguous keys are dropped rather than guessed: two riders reducing to the
+    same key means we cannot tell them apart, and awarding a championship total
+    to the wrong one is far worse than leaving a computed figure in place.
+    """
+    from .adapters.official_standings import match_key
+    idx, dupes = {}, set()
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, full_name FROM riders")
+        for rid, name in cur.fetchall():
+            k = match_key(name)
+            if not k:
+                continue
+            if k in idx and idx[k] != rid:
+                dupes.add(k)
+            idx.setdefault(k, rid)
+        cur.execute("SELECT rider_id, alias FROM rider_aliases")
+        for rid, alias in cur.fetchall():
+            k = match_key(alias)
+            if k and k not in idx:
+                idx[k] = rid
+    for k in dupes:
+        idx.pop(k, None)
+    return idx
+
+
+def apply_official_standings(conn, season_id: int | None = None) -> dict:
+    """Overlay the series' own published points onto our computed standings.
+
+    Deliberately an OVERLAY, not a replacement. recompute_standings() still runs
+    first and still owns wins and podiums, which are unambiguous from results.
+    This only corrects `points` and `position` — the two things the provider can
+    state and we can only infer, because of point adjustments.
+
+    Nothing here raises. If the provider is slow, unreachable or mid-update on a
+    race afternoon, every championship simply keeps its computed figure, which
+    is correct to within an adjustment. Standings going stale beats standings
+    going blank.
+    """
+    from .adapters.official_standings import CHAMPIONSHIPS, fetch_standings, match_key
+
+    with conn.cursor() as cur:
+        # Any recent event anchors the page; the provider returns the whole
+        # season for whichever championship is asked for.
+        cur.execute(
+            """
+            SELECT e.source_url FROM events e
+            JOIN seasons se ON se.id = e.season_id
+            WHERE e.source_url LIKE '%%view_event%%' AND e.status = 'final'
+            ORDER BY e.event_date DESC LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+    if not row:
+        return {"anchor": None, "applied": 0, "championships": {}}
+    m = re.search(r"[?&]id=(\d+)", row[0] or "")
+    if not m:
+        return {"anchor": None, "applied": 0, "championships": {}}
+    anchor = m.group(1)
+
+    index = _rider_index(conn)
+    report, total = {}, 0
+
+    for abbrev, cls, sid in CHAMPIONSHIPS:
+        rows = fetch_standings(sid, anchor)
+        if not rows:
+            report[f"{abbrev} {cls}"] = "unavailable"
+            continue
+        changed = matched = unmatched = 0
+        with conn.cursor() as cur:
+            for r in rows:
+                rider_id = index.get(match_key(r["rider"]))
+                if rider_id is None:
+                    unmatched += 1
+                    continue
+                matched += 1
+                cur.execute(
+                    """
+                    UPDATE standings st SET points = %s, position = %s
+                    FROM seasons se, series s
+                    WHERE st.season_id = se.id AND se.series_id = s.id
+                      AND s.abbrev = %s AND st.class = %s AND st.rider_id = %s
+                      AND (st.points IS DISTINCT FROM %s
+                           OR st.position IS DISTINCT FROM %s)
+                    """ + ("AND se.id = %s" if season_id is not None else ""),
+                    (r["points"], r["position"], abbrev, cls, rider_id,
+                     r["points"], r["position"])
+                    + ((season_id,) if season_id is not None else ()),
+                )
+                changed += cur.rowcount
+        conn.commit()
+        total += changed
+        report[f"{abbrev} {cls}"] = {
+            "rows": len(rows), "matched": matched,
+            "unmatched": unmatched, "updated": changed,
+        }
+
+    return {"anchor": anchor, "applied": total, "championships": report}

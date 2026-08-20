@@ -27,7 +27,7 @@ from .adapters.schedule_smx import ScheduleSMXAdapter
 from .db import get_connection
 from .notify import notify_work
 from .pipeline.run_results import resolve_missing_event_ids, select_events
-from .standings import recompute_standings
+from .standings import apply_official_standings, recompute_standings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -139,7 +139,28 @@ def _catch_up_missed_rounds(conn):
             log.exception("results: catch-up failed for event %s", ev["event_id"])
     for sid in season_ids:
         recompute_standings(conn, season_id=sid)
+    _overlay_official(conn)
     log.info("results: caught up %s missed round(s)", len(events))
+
+
+def _overlay_official(conn) -> None:
+    """Correct our computed points with the series' published ones.
+
+    Best-effort by design: standings that are a penalty out beat standings that
+    failed to load, so a bad response here must never fail the ingest.
+    """
+    try:
+        rep = apply_official_standings(conn)
+        log.info("standings: official overlay anchored on event %s, %s row(s) corrected",
+                 rep.get("anchor"), rep.get("applied"))
+        for name, detail in (rep.get("championships") or {}).items():
+            if detail == "unavailable":
+                log.warning("standings: %s unavailable from the provider", name)
+            elif detail.get("unmatched"):
+                log.info("standings: %s had %s rider(s) we could not match",
+                         name, detail["unmatched"])
+    except Exception:
+        log.exception("standings: official overlay failed; keeping computed figures")
 
 
 def results_work():
@@ -177,6 +198,7 @@ def results_work():
             season_ids.add(ev["season_id"])
         for sid in season_ids:
             recompute_standings(conn, season_id=sid)
+        _overlay_official(conn)
         log.info("results: done")
 
 

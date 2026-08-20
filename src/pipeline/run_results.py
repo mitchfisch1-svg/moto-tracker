@@ -20,7 +20,9 @@ sys.path.insert(0, str(ROOT))
 from src.adapters.results_html import ResultsHTMLAdapter  # noqa: E402
 from src.db import get_connection  # noqa: E402
 from src.resolve.riders import RiderResolver  # noqa: E402
-from src.standings import recompute_standings  # noqa: E402
+from src.standings import (  # noqa: E402
+    apply_official_standings, recompute_standings,
+)
 
 _SMX_ID_RE = re.compile(r"view_event&id=(\d+)")
 
@@ -45,6 +47,28 @@ _EVENT_ID_RES = (
     re.compile(r"p=view_event&(?:amp;)?id=(\d+)"),
     re.compile(r"view_combined_round_ranking&(?:amp;)?id=(\d+)"),
 )
+
+
+def _report_official(report):
+    """Print what the official-standings overlay changed.
+
+    Silence here would be the worst outcome: if the provider stops answering we
+    keep serving computed points, which are right to within a penalty — correct
+    enough to look fine and wrong enough to matter. Say so out loud.
+    """
+    if not report or not report.get("championships"):
+        print("  official standings: nothing applied (no anchor event yet)")
+        return
+    print(f"  official standings (anchor event {report.get('anchor')}): "
+          f"{report.get('applied', 0)} row(s) corrected")
+    for name, detail in report["championships"].items():
+        if detail == "unavailable":
+            print(f"    ! {name}: unavailable from the provider — keeping computed")
+        else:
+            extra = (f", {detail['unmatched']} unmatched"
+                     if detail.get("unmatched") else "")
+            print(f"    - {name}: {detail['matched']}/{detail['rows']} matched, "
+                  f"{detail['updated']} updated{extra}")
 
 
 def resolve_missing_event_ids(conn):
@@ -195,6 +219,7 @@ def main():
     if args.recompute_only:
         with get_connection() as conn:
             recompute_standings(conn)
+            _report_official(apply_official_standings(conn))
             with conn.cursor() as cur:
                 cur.execute("SELECT DISTINCT season_id FROM standings")
                 season_ids = [row[0] for row in cur.fetchall()]
@@ -227,6 +252,7 @@ def main():
 
         for sid in season_ids:
             recompute_standings(conn, season_id=sid)
+        _report_official(apply_official_standings(conn))
 
         print_standings(conn, season_ids)
 
