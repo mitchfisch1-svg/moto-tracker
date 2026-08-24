@@ -1792,6 +1792,7 @@ def live(demo: bool = False):
 _RESULTS_HOME = "https://results.supermotocross.com/results/"
 _RESULT_HEADER = ["POS", "#", "BIKE", "RIDER"]
 _POS_RE = re.compile(r"^(\d+|DNF|DNS|DSQ|DNQ)$", re.I)
+_SCORED_RE = re.compile(r"\d")   # a moto cell that holds a real finish
 _RACE_LINK_RE = re.compile(r"view_race_result&(?:amp;)?id=(\d+)")
 _OVERALL_LINK_RE = re.compile(r"view_multi_main_result&(?:amp;)?id=(\d+)")
 _COMBQUAL_LINK_RE = re.compile(
@@ -1804,6 +1805,30 @@ _TRACK_MAP_RE = re.compile(
 # Results views the session browser may request (guards the upstream URL).
 _SESSION_VIEWS = {"view_race_result", "view_multi_main_result",
                   "view_combined_round_ranking"}
+
+
+# How long a half-finished Overall may be reused. Short: it is the one board
+# that changes underneath us, and it changes into the answer people want.
+_OVERALL_PROVISIONAL_TTL = 120
+# How many rows must show both motos before we treat an Overall as the round's
+# settled result. Ten is enough to be sure and small enough to survive the odd
+# scratched entry: a rider who sits out a moto cannot finish the round top ten.
+_OVERALL_SETTLED_ROWS = 10
+
+
+def _overall_is_settled(both_motos) -> bool:
+    """Is this Overall the round's result, or a snapshot taken between motos?
+
+    The results site publishes the Overall as soon as moto 1 is scored and
+    fills the moto-2 column with dashes, so a table pulled at 1pm has the same
+    riders, the same shape and the same air of authority as the final one with
+    half the race missing. Nothing in the markup says which you are holding —
+    only whether the second moto has numbers in it.
+    """
+    if not both_motos:
+        return False        # no scoring rows at all: not a result either
+    return all(both_motos[:_OVERALL_SETTLED_ROWS])
+
 
 # Bike makes recognized inside team names (kept in sync with results_html.py).
 _MAKES = ["KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS", "GAS GAS",
@@ -2046,6 +2071,7 @@ def live_session_results(race_id: int, p: str = "view_race_result",
     is_overall = "MOTO 1" in up and "MOTO 2" in up
 
     rows = []
+    both_motos = []   # per row: did BOTH motos actually score? (overall views)
     for tr in table.find_all("tr"):
         cells = [c.get_text(" ", strip=True)
                  for c in tr.find_all(["th", "td"], recursive=False)]
@@ -2059,7 +2085,18 @@ def live_session_results(race_id: int, p: str = "view_race_result",
             m1 = cells[4] if len(cells) > 4 else ""
             m2 = cells[5] if len(cells) > 5 else ""
             total = cells[6] if len(cells) > 6 else ""
-            primary_label, primary = "MOTOS", (f"{m1}-{m2}" if m1 or m2 else None)
+            # A moto that has not run yet is a row of dashes, not a blank, so
+            # "1" + "---" used to print as "1----". Only call a moto scored if
+            # there is a digit in it, and name the moto we actually have.
+            s1, s2 = _SCORED_RE.search(m1), _SCORED_RE.search(m2)
+            both_motos.append(bool(s1 and s2))
+            if s1 and s2:
+                primary_label, primary = "MOTOS", f"{m1}-{m2}"
+            elif s1 or s2:
+                primary_label = "MOTO 1" if s1 else "MOTO 2"
+                primary = (m1 if s1 else m2).strip()
+            else:
+                primary_label, primary = "MOTOS", None
             secondary_label, secondary = "", (f"{total} pts" if total else None)
         else:
             # Pass the site's own column labels through with the values.
@@ -2082,6 +2119,14 @@ def live_session_results(race_id: int, p: str = "view_race_result",
             "manufacturer": _make_from_team(team),
         })
     payload = {"race_id": race_id, "p": p, "results": rows}
+    # An Overall fetched between the motos is NOT a result — it is half a
+    # result wearing the shape of one, and this cache has no expiry, so caching
+    # it pins "1---- 25 pts" forever. Serve it (the moto-1 order is real), but
+    # keep it briefly and in memory only, so the finished board replaces it.
+    if is_overall and not _overall_is_settled(both_motos):
+        _SESSIONS_CACHE[cache_key] = (time.time() + _OVERALL_PROVISIONAL_TTL,
+                                      payload)
+        return payload
     _SESSIONS_CACHE[cache_key] = (time.time() + _SESSION_RESULT_TTL, payload)
     _db_cache_put(db_key, payload)
     return payload
@@ -2742,9 +2787,23 @@ def recap():
 # --- events ----------------------------------------------------------------
 _OVERALL_LABEL_RE = re.compile(
     r'href="[^"]*view_multi_main_result&(?:amp;)?id=(\d+)"[^>]*>(.*?)</a>', re.S)
+_MOTO_PAIR_RE = re.compile(r"^\d+-\d+$")   # "2-1": both motos scored
 
 
-def _event_overall(source_url):
+def _overall_block_is_settled(rows) -> bool:
+    """Same question as _overall_is_settled, asked of an already-built board.
+
+    Rows reach here either fresh from the parser or out of the cache, so judge
+    them by what is on the page: the site scores every finisher in both motos,
+    DNFs included, so a top-ten row that is not two numbers is a moto that has
+    not happened yet.
+    """
+    return _overall_is_settled(
+        [bool(_MOTO_PAIR_RE.match((r.get("primary") or "").strip()))
+         for r in rows])
+
+
+def _event_overall(source_url, event_status=None):
     """The round's OVERALL result — both motos combined, as the series scores it.
 
     Per-moto results answer "who won that moto". They do not answer "who won the
@@ -2754,10 +2813,12 @@ def _event_overall(source_url):
     finishes and the points they add up to, so take that rather than adding
     motos up ourselves — the same reasoning that fixed the standings.
 
-    Cached in the database once fetched. The results site only serves an event
-    while it is current, so without persisting this the Overall would vanish the
-    moment the next round goes on track — which is exactly when someone wants to
-    look back at it.
+    Persisted in the database once the round is over. The results site only
+    serves an event while it is current, so without keeping this the Overall
+    would vanish the moment the next round goes on track — which is exactly
+    when someone wants to look back at it. Only the finished board earns that,
+    though: this cache has no expiry, so anything stored mid-round is stored
+    for good.
     """
     smx = _event_smx_id(source_url)
     if not smx:
@@ -2766,6 +2827,12 @@ def _event_overall(source_url):
     cached = _db_cache_get(key)
     if cached is not None:
         return cached
+    # Re-scraping the link page per request would be brutal on race day, when
+    # the board is deliberately not being persisted. Hold it in memory instead.
+    mem_key = ("overall", smx)
+    live = _sessions_cache_get(mem_key)
+    if live is not None:
+        return live
 
     try:
         page = requests.get(f"{_RESULTS_HOME}?p=view_event&id={smx}",
@@ -2789,10 +2856,18 @@ def _event_overall(source_url):
         if rows:
             out.append({"label": label, "race_id": race_id, "rows": rows})
 
-    # Only cache a real answer. Caching [] would pin an empty Overall for a
-    # round whose results simply had not been posted yet.
-    if out:
+    # Persist only the round's finished answer. Two ways this is not one yet:
+    # a class whose second moto has not run, and a class whose Overall link the
+    # site has not posted at all — at noon the page may list 250 only, and this
+    # key has no expiry, so a board saved then is the board forever. Requiring
+    # the event to be final covers the second case, which the rows cannot show.
+    settled = (bool(out)
+               and event_status == "final"
+               and all(_overall_block_is_settled(b["rows"]) for b in out))
+    if settled:
         _db_cache_put(key, out)
+    else:
+        _SESSIONS_CACHE[mem_key] = (time.time() + _OVERALL_PROVISIONAL_TTL, out)
     return out
 
 
@@ -2815,7 +2890,7 @@ def event(event_id: int):
     source_url = info[0].pop("source_url", None)
     info[0]["track_map"] = _event_track_map(source_url)
     # Both motos combined — who actually won the round, not just each moto.
-    info[0]["overall"] = _event_overall(source_url)
+    info[0]["overall"] = _event_overall(source_url, info[0].get("status"))
     sessions = query(
         "SELECT id, class, type, label FROM sessions WHERE event_id = %s ORDER BY id",
         [event_id],
