@@ -377,7 +377,11 @@ def _notify_loop():
 _LA_STALE_S = 900
 # ...and once the day is done, how long the final result stays up before iOS
 # clears it on its own.
-_LA_RESULT_HOLD_S = 3600
+# How long the finishing order stays on the lock screen once the day is done.
+# Half an hour: long enough to read the result you waited all afternoon for,
+# short enough that it is gone before it becomes something you have to swipe
+# away. Nobody should have to tidy up after a race.
+_LA_RESULT_HOLD_S = 1800
 
 _LA_INTERVAL_S = 10
 # Off race day the loop just re-asks the (cached) race-window gate, so this
@@ -1728,6 +1732,16 @@ def live(demo: bool = False):
             timing["race_state"] = "finished"   # ran out and everyone went home
         else:
             timing["stale_grid"] = True         # published early; nothing is on
+
+    # A grid nobody has touched in half an hour was published ahead of time, so
+    # there is nothing to be live ABOUT. Saying so here is what takes the card
+    # off the lock screen: everything downstream gates on `live`, and without
+    # this the flag was computed and then ignored — which is how "250 Group B
+    # Qualifying 1 - on the gate" sat there at 11:51 PM for an 8 AM session.
+    if timing.get("stale_grid"):
+        nxt = next_events(limit=1)
+        return {"live": False, "event": None,
+                "next_event": nxt[0] if nxt else None}
 
     # Qualifying: also expose the class-wide combined board (both groups by best
     # lap), which is what the broadcast shows and what fans actually want.
