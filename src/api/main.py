@@ -2740,6 +2740,62 @@ def recap():
 
 
 # --- events ----------------------------------------------------------------
+_OVERALL_LABEL_RE = re.compile(
+    r'href="[^"]*view_multi_main_result&(?:amp;)?id=(\d+)"[^>]*>(.*?)</a>', re.S)
+
+
+def _event_overall(source_url):
+    """The round's OVERALL result — both motos combined, as the series scores it.
+
+    Per-moto results answer "who won that moto". They do not answer "who won the
+    round", which is the question a championship is actually decided by: a 2-1
+    beats a 1-4 and no amount of staring at two separate lists makes that
+    obvious. The series publishes the combined table, with each rider's two
+    finishes and the points they add up to, so take that rather than adding
+    motos up ourselves — the same reasoning that fixed the standings.
+
+    Cached in the database once fetched. The results site only serves an event
+    while it is current, so without persisting this the Overall would vanish the
+    moment the next round goes on track — which is exactly when someone wants to
+    look back at it.
+    """
+    smx = _event_smx_id(source_url)
+    if not smx:
+        return []
+    key = f"overall:{smx}"
+    cached = _db_cache_get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        page = requests.get(f"{_RESULTS_HOME}?p=view_event&id={smx}",
+                            headers=_LRM_HEADERS, timeout=20)
+        page.raise_for_status()
+    except Exception:
+        return []
+
+    out = []
+    seen = set()
+    for race_id, raw_label in _OVERALL_LABEL_RE.findall(page.text):
+        label = re.sub(r"<[^>]+>", "", raw_label).strip()
+        if not label or race_id in seen:
+            continue          # each link appears twice: the row and its PDF
+        seen.add(race_id)
+        try:
+            res = live_session_results(int(race_id), p="view_multi_main_result")
+        except Exception:
+            continue
+        rows = (res or {}).get("results") or []
+        if rows:
+            out.append({"label": label, "race_id": race_id, "rows": rows})
+
+    # Only cache a real answer. Caching [] would pin an empty Overall for a
+    # round whose results simply had not been posted yet.
+    if out:
+        _db_cache_put(key, out)
+    return out
+
+
 @app.get("/events/{event_id}")
 def event(event_id: int):
     info = query(
@@ -2756,7 +2812,10 @@ def event(event_id: int):
     )
     if not info:
         raise HTTPException(status_code=404, detail="event not found")
-    info[0]["track_map"] = _event_track_map(info[0].pop("source_url", None))
+    source_url = info[0].pop("source_url", None)
+    info[0]["track_map"] = _event_track_map(source_url)
+    # Both motos combined — who actually won the round, not just each moto.
+    info[0]["overall"] = _event_overall(source_url)
     sessions = query(
         "SELECT id, class, type, label FROM sessions WHERE event_id = %s ORDER BY id",
         [event_id],
