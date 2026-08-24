@@ -385,22 +385,53 @@ _LA_INTERVAL_S = 10
 _LA_IDLE_INTERVAL_S = 300
 
 
+_LAPPED_RE = re.compile(r"^L\s*(\d+)$", re.I)
+
+
+def readable_gap(gap):
+    """Turn the timing feed's shorthand into something a person can read.
+
+    The provider writes a lapped rider's deficit as "L1" / "L2". The app has
+    always translated that; the widget and the lock screen never did, so the
+    home screen read "Hymas L1" where the app read "1 lap down". Cryptic on the
+    one surface you glance at without opening anything.
+    """
+    raw = (gap or "").strip()
+    m = _LAPPED_RE.match(raw)
+    if not m:
+        return raw
+    n = m.group(1)
+    return "1 lap down" if n == "1" else f"{n} laps down"
+
+
 def _la_content_state(payload):
     t = payload.get("timing") or {}
     state = t.get("race_state") or "racing"
     # During qualifying the lock screen should show the same class-wide best-lap
     # board the app and the broadcast show, not one group's running order.
+    # The value beside each rider means different things in the two kinds of
+    # session, and the SERVER decides which — the client just renders the
+    # string. It used to decide for itself, hardcoding "Leader" for P1, which
+    # threw away the one number a qualifying board exists to show: the lock
+    # screen read "Kitchen — Leader" while the broadcast read "Kitchen
+    # 1:56.283". Knowing he is fastest is not the same as knowing his time.
     cq = t.get("combined_qualifying")
     if cq:
+        # Qualifying is only about the lap. Everyone gets their time, P1
+        # included — exactly the board the broadcast puts on screen.
         riders = [
             {"p": r.get("position"), "n": display_surname(r.get("name")),
              "num": str(r.get("number") or ""), "g": (r.get("best_lap") or "")[:12]}
             for r in (cq.get("riders") or [])[:5]
         ]
     else:
+        # A race is about the gap, and there the leader IS the reference — his
+        # own elapsed time tells you nothing about the fight behind him.
         riders = [
             {"p": r.get("position"), "n": display_surname(r.get("name")),
-             "num": str(r.get("number") or ""), "g": (r.get("gap") or "")[:12]}
+             "num": str(r.get("number") or ""),
+             "g": ("Leader" if r.get("position") == 1
+                   else readable_gap(r.get("gap"))[:12])}
             for r in (t.get("riders") or [])[:5]
         ]
     clock = t.get("clock") or {}
@@ -2390,7 +2421,8 @@ def widget_standings():
             {"position": r.get("position"), "rider_id": None,
              "full_name": r.get("name"), "points": None,
              "detail": (r.get("best_lap") if cq
-                        else ("Leader" if r.get("position") == 1 else r.get("gap")))}
+                        else ("Leader" if r.get("position") == 1
+                              else readable_gap(r.get("gap"))))}
             for r in src[:5]
         ]
         if rows:

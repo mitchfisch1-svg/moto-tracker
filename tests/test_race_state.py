@@ -27,6 +27,7 @@ from src.api.main import (  # noqa: E402
     _race_finished,
     _race_started,
     _order_signature,
+    readable_gap,
     _site_shows_this_round,
 )
 
@@ -331,3 +332,30 @@ def test_the_signature_ignores_jittering_gaps():
 def test_a_missing_clock_counts_as_dead():
     t = grid(laps=6); t["clock"] = {}
     assert _feed_is_stalled(t, 600, "racing") is True
+
+
+# --- what the glanceable surfaces say beside each rider ----------------------
+
+def test_a_lapped_rider_reads_in_english():
+    """The provider writes a lapped deficit as "L1". The app has always
+    translated it; the widget and lock screen never did, so the home screen
+    read "Hymas L1" where the app read "1 lap down"."""
+    assert readable_gap("L1") == "1 lap down"
+    assert readable_gap("L2") == "2 laps down"
+    assert readable_gap("L 3") == "3 laps down"
+
+
+def test_a_real_gap_is_left_exactly_as_it_is():
+    """Seconds are the whole point during a race — don't reformat them."""
+    assert readable_gap("0.406") == "0.406"
+    assert readable_gap("+1.246") == "+1.246"
+
+
+def test_nothing_stays_nothing():
+    assert readable_gap("") == ""
+    assert readable_gap(None) == ""
+
+
+def test_a_word_is_not_mistaken_for_a_lap_count():
+    assert readable_gap("Leader") == "Leader"
+    assert readable_gap("Lapped") == "Lapped"
