@@ -44,9 +44,11 @@ def poisoned(cur):
         # 'overall:{smx}' holds one block per class; the session key holds one
         # board. A single unsettled class spoils the whole event key.
         blocks = (payload if key.startswith("overall:")
-                  else [{"label": key, "rows": payload.get("results") or []}])
+                  else [{"label": key, "rows": payload.get("results") or [],
+                         **({"settled": payload["settled"]}
+                            if "settled" in payload else {})}])
         bad = [b["label"] for b in blocks
-               if not _overall_block_is_settled(b["rows"])]
+               if not _overall_block_is_settled(b)]
         if bad:
             yield key, updated, bad
 

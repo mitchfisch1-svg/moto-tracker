@@ -1792,7 +1792,8 @@ def live(demo: bool = False):
 _RESULTS_HOME = "https://results.supermotocross.com/results/"
 _RESULT_HEADER = ["POS", "#", "BIKE", "RIDER"]
 _POS_RE = re.compile(r"^(\d+|DNF|DNS|DSQ|DNQ)$", re.I)
-_SCORED_RE = re.compile(r"\d")   # a moto cell that holds a real finish
+_SCORED_RE = re.compile(r"\d")        # a moto cell that holds a real finish
+_MOTO_COL_RE = re.compile(r"^MOTO \d+$")
 _RACE_LINK_RE = re.compile(r"view_race_result&(?:amp;)?id=(\d+)")
 _OVERALL_LINK_RE = re.compile(r"view_multi_main_result&(?:amp;)?id=(\d+)")
 _COMBQUAL_LINK_RE = re.compile(
@@ -2069,6 +2070,12 @@ def live_session_results(race_id: int, p: str = "view_race_result",
     home_idx = up.index("HOMETOWN") if "HOMETOWN" in up else None
     stat_end = min(i for i in (team_idx, home_idx, len(header)) if i is not None)
     is_overall = "MOTO 1" in up and "MOTO 2" in up
+    # An Overall has one column per race and a total. SX Triple Crown rounds
+    # score THREE, so read the columns off the header rather than assuming a
+    # moto's worth of them sat at 4, 5 and 6.
+    moto_cols = [i for i, h in enumerate(up) if _MOTO_COL_RE.match(h)]
+    total_col = next((i for i, h in enumerate(up) if h.startswith("TOTAL")),
+                     None)
 
     rows = []
     both_motos = []   # per row: did BOTH motos actually score? (overall views)
@@ -2082,21 +2089,23 @@ def live_session_results(race_id: int, p: str = "view_race_result",
         name = re.sub(r"\s+HOLESHOT$", "", cells[3] or "", flags=re.I).strip()
         if is_overall:
             # Show the moto scores (e.g. "1-1") plus the round point total.
-            m1 = cells[4] if len(cells) > 4 else ""
-            m2 = cells[5] if len(cells) > 5 else ""
-            total = cells[6] if len(cells) > 6 else ""
             # A moto that has not run yet is a row of dashes, not a blank, so
             # "1" + "---" used to print as "1----". Only call a moto scored if
-            # there is a digit in it, and name the moto we actually have.
-            s1, s2 = _SCORED_RE.search(m1), _SCORED_RE.search(m2)
-            both_motos.append(bool(s1 and s2))
-            if s1 and s2:
-                primary_label, primary = "MOTOS", f"{m1}-{m2}"
-            elif s1 or s2:
-                primary_label = "MOTO 1" if s1 else "MOTO 2"
-                primary = (m1 if s1 else m2).strip()
-            else:
+            # there is a digit in it, and name the motos we actually have.
+            scores = [cells[i] if i < len(cells) else "" for i in moto_cols]
+            scored = [bool(_SCORED_RE.search(s)) for s in scores]
+            both_motos.append(bool(scored) and all(scored))
+            got = [s.strip() for s, ok in zip(scores, scored) if ok]
+            if not got:
                 primary_label, primary = "MOTOS", None
+            elif len(got) == len(scores):
+                primary_label, primary = "MOTOS", "-".join(got)
+            else:
+                primary_label = " + ".join(f"MOTO {i + 1}"
+                                           for i, ok in enumerate(scored) if ok)
+                primary = "-".join(got)
+            total = (cells[total_col] if total_col is not None
+                     and total_col < len(cells) else "")
             secondary_label, secondary = "", (f"{total} pts" if total else None)
         else:
             # Pass the site's own column labels through with the values.
@@ -2119,11 +2128,16 @@ def live_session_results(race_id: int, p: str = "view_race_result",
             "manufacturer": _make_from_team(team),
         })
     payload = {"race_id": race_id, "p": p, "results": rows}
+    if is_overall:
+        # The parser is the only place that can tell a finished two-moto round
+        # from a Triple Crown with a race still to run — both read "4-2" once
+        # the columns are gone. Say so here rather than guessing later.
+        payload["settled"] = _overall_is_settled(both_motos)
     # An Overall fetched between the motos is NOT a result — it is half a
     # result wearing the shape of one, and this cache has no expiry, so caching
     # it pins "1---- 25 pts" forever. Serve it (the moto-1 order is real), but
     # keep it briefly and in memory only, so the finished board replaces it.
-    if is_overall and not _overall_is_settled(both_motos):
+    if is_overall and not payload["settled"]:
         _SESSIONS_CACHE[cache_key] = (time.time() + _OVERALL_PROVISIONAL_TTL,
                                       payload)
         return payload
@@ -2787,20 +2801,24 @@ def recap():
 # --- events ----------------------------------------------------------------
 _OVERALL_LABEL_RE = re.compile(
     r'href="[^"]*view_multi_main_result&(?:amp;)?id=(\d+)"[^>]*>(.*?)</a>', re.S)
-_MOTO_PAIR_RE = re.compile(r"^\d+-\d+$")   # "2-1": both motos scored
+# "2-1", or "4-2-3" for an SX Triple Crown: every race of the round scored.
+_MOTO_PAIR_RE = re.compile(r"^\d+(?:-\d+)+$")
 
 
-def _overall_block_is_settled(rows) -> bool:
-    """Same question as _overall_is_settled, asked of an already-built board.
+def _overall_block_is_settled(block) -> bool:
+    """Same question as _overall_is_settled, asked of one class's board.
 
-    Rows reach here either fresh from the parser or out of the cache, so judge
-    them by what is on the page: the site scores every finisher in both motos,
-    DNFs included, so a top-ten row that is not two numbers is a moto that has
-    not happened yet.
+    A freshly parsed board carries the parser's own verdict, which is the one
+    to trust: only the parser saw the columns. Boards read back out of the
+    cache predate that, so fall back to the rows — the site scores every
+    finisher in every moto, DNFs included, so a top-ten row that is not a run
+    of numbers is a race that has not happened yet.
     """
+    if "settled" in block:
+        return bool(block["settled"])
     return _overall_is_settled(
         [bool(_MOTO_PAIR_RE.match((r.get("primary") or "").strip()))
-         for r in rows])
+         for r in block.get("rows") or []])
 
 
 def _event_overall(source_url, event_status=None, expected_classes=0):
@@ -2854,7 +2872,8 @@ def _event_overall(source_url, event_status=None, expected_classes=0):
             continue
         rows = (res or {}).get("results") or []
         if rows:
-            out.append({"label": label, "race_id": race_id, "rows": rows})
+            out.append({"label": label, "race_id": race_id, "rows": rows,
+                        "settled": bool((res or {}).get("settled"))})
 
     # A class is missing from `out` two ways: its second moto has not run, or
     # the site has not posted its Overall link yet — at noon the page may list
@@ -2863,7 +2882,7 @@ def _event_overall(source_url, event_status=None, expected_classes=0):
     # already banked stays banked, and a class that arrives later joins it.
     blocks = {b["race_id"]: b for b in stored}   # everything stored is settled
     for b in out:
-        if b["race_id"] not in blocks or _overall_block_is_settled(b["rows"]):
+        if b["race_id"] not in blocks or _overall_block_is_settled(b):
             blocks[b["race_id"]] = b            # never trade down to half a board
     shown = sorted(blocks.values(), key=lambda b: b["label"])
 
@@ -2872,7 +2891,7 @@ def _event_overall(source_url, event_status=None, expected_classes=0):
     # round is remembered as long after the site has stopped serving it.
     if (shown and event_status == "final"
             and len(shown) >= max(expected_classes, 1)
-            and all(_overall_block_is_settled(b["rows"]) for b in shown)):
+            and all(_overall_block_is_settled(b) for b in shown)):
         _db_cache_put(key, shown)
     else:
         _SESSIONS_CACHE[mem_key] = (time.time() + _OVERALL_PROVISIONAL_TTL,

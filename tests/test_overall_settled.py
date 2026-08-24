@@ -41,26 +41,33 @@ def _board(primaries):
     return [{"position": i, "primary": p} for i, p in enumerate(primaries, 1)]
 
 
+def _blk(primaries):
+    """A block as it comes back out of the cache: rows, and no record of what
+    the parser made of them."""
+    return {"label": "450 Overall Results", "race_id": 1,
+            "rows": _board(primaries)}
+
+
 def test_the_half_round_is_not_a_result():
-    assert not _overall_block_is_settled(_board(HALF_450))
+    assert not _overall_block_is_settled(_blk(HALF_450))
 
 
 def test_the_finished_round_is():
-    assert _overall_block_is_settled(_board(FINAL_450))
+    assert _overall_block_is_settled(_blk(FINAL_450))
 
 
 def test_an_empty_board_is_not_a_result():
     """No rows means the Overall has not been posted, not that it is settled.
     all([]) is True, and that is exactly how you cache an empty round."""
     assert not _overall_is_settled([])
-    assert not _overall_block_is_settled([])
+    assert not _overall_block_is_settled(_blk([]))
 
 
 def test_one_missing_moto_deep_in_the_top_ten_still_blocks_it():
     """The lie does not have to be at the top. A board whose tenth row is a
     moto short is still a board taken before the race ended."""
     mixed = FINAL_450[:9] + ["10----"] + FINAL_450[10:]
-    assert not _overall_block_is_settled(_board(mixed))
+    assert not _overall_block_is_settled(_blk(mixed))
 
 
 def test_the_check_stops_at_the_top_ten():
@@ -68,14 +75,14 @@ def test_the_check_stops_at_the_top_ten():
     not be re-scraped forever because someone in 30th packed up early. Nobody
     who misses a moto finishes the round in the top ten."""
     tail_short = FINAL_450[:_OVERALL_SETTLED_ROWS] + ["21----", "22----"]
-    assert _overall_block_is_settled(_board(tail_short))
+    assert _overall_block_is_settled(_blk(tail_short))
 
 
 def test_a_short_field_must_still_be_complete():
     """WMX ran 34 riders; a class could run fewer than ten. Every row there is
     has to be scored — a two-row board is not settled by running out of rows."""
-    assert _overall_block_is_settled(_board(["1-1", "2-2"]))
-    assert not _overall_block_is_settled(_board(["1-1", "2----"]))
+    assert _overall_block_is_settled(_blk(["1-1", "2-2"]))
+    assert not _overall_block_is_settled(_blk(["1-1", "2----"]))
 
 
 # --- the parse, end to end ---------------------------------------------------
@@ -184,8 +191,9 @@ def _fetch(monkeypatch, posted, *, stored=None, status="final",
 
     def fake_results(race_id, p=None, **kw):
         cls = by_race[race_id]
-        primaries = HALF_450 if cls in half else FINAL_450
-        return {"results": _board(primaries)}
+        done = cls not in half
+        return {"results": _board(FINAL_450 if done else HALF_450),
+                "settled": done}
 
     monkeypatch.setattr(main.requests, "get",
                         lambda *a, **k: _Resp(_event_page(posted)))
@@ -212,7 +220,7 @@ def test_the_late_class_joins_the_board_instead_of_replacing_it(monkeypatch):
     """250 and WMX were already banked. When the 450 finally appears the board
     is all three — not the one class this scrape happened to see."""
     banked = [{"label": f"{c} Overall Results", "race_id": _LINKS[c],
-               "rows": _board(FINAL_450)} for c in ("250", "WMX")]
+               "rows": _board(FINAL_450), "settled": True} for c in ("250", "WMX")]
     out, put = _fetch(monkeypatch, ["450"], stored=banked)
     assert [b["label"] for b in out] == ["250 Overall Results",
                                          "450 Overall Results",
@@ -244,7 +252,7 @@ def test_a_complete_stored_board_is_served_without_scraping(monkeypatch):
     from src.api import main
 
     banked = [{"label": f"{c} Overall Results", "race_id": _LINKS[c],
-               "rows": _board(FINAL_450)} for c in ("250", "450", "WMX")]
+               "rows": _board(FINAL_450), "settled": True} for c in ("250", "450", "WMX")]
     main._SESSIONS_CACHE.clear()
     monkeypatch.setattr(main, "_db_cache_get", lambda key: banked)
 
@@ -264,7 +272,7 @@ def test_the_stored_board_survives_the_site_going_down(monkeypatch):
     from src.api import main
 
     banked = [{"label": f"{c} Overall Results", "race_id": _LINKS[c],
-               "rows": _board(FINAL_450)} for c in ("250", "WMX")]
+               "rows": _board(FINAL_450), "settled": True} for c in ("250", "WMX")]
     main._SESSIONS_CACHE.clear()
     monkeypatch.setattr(main, "_db_cache_get", lambda key: banked)
 
@@ -276,3 +284,56 @@ def test_the_stored_board_survives_the_site_going_down(monkeypatch):
         f"https://results.supermotocross.com/results/?p=view_event&id={_SMX}",
         "final", 3)
     assert len(out) == 2
+
+
+# --- SX Triple Crown ---------------------------------------------------------
+# Three races, not two, and the round goes to the LOWEST total: Webb's 4-2-3
+# for 9 beats Hunter's 7-1-2 for 10. Reading two moto columns and calling the
+# third one the point total gave "4-2 · 3 pts" — a race finish sold as points,
+# with a whole race missing. Anaheim 2, 2026-01-31, 450 Overall.
+_TC_HEAD = "<tr><th>Pos</th><th>#</th><th>Bike</th><th>Rider</th>" \
+           "<th>Moto 1</th><th>Moto 2</th><th>Moto 3</th>" \
+           "<th>Total Points</th></tr>"
+_TC_ROWS = [("1", "Cooper Webb", "4", "2", "3", "9"),
+            ("2", "Hunter Lawrence", "7", "1", "2", "10"),
+            ("3", "Ken Roczen", "1", "5", "4", "10")]
+
+
+def _triple_crown_page(rows):
+    body = "".join(
+        f"<tr><td>{pos}</td><td>1</td><td>KTM</td><td>{name}</td>"
+        f"<td>{a}</td><td>{b}</td><td>{c}</td><td>{tot}</td></tr>"
+        for pos, name, a, b, c, tot in rows)
+    return f"<html><table>{_TC_HEAD}{body}</table></html>"
+
+
+def test_all_three_races_are_shown(monkeypatch):
+    rows, _ = _scrape(monkeypatch, _triple_crown_page(_TC_ROWS), 493648)
+    assert [r["primary"] for r in rows] == ["4-2-3", "7-1-2", "1-5-4"]
+
+
+def test_the_total_is_read_from_its_own_column(monkeypatch):
+    """With three races the total sits one column further right. Assuming its
+    position turned Webb's third-race finish into his points."""
+    rows, _ = _scrape(monkeypatch, _triple_crown_page(_TC_ROWS), 493648)
+    assert [r["secondary"] for r in rows] == ["9 pts", "10 pts", "10 pts"]
+
+
+def test_a_triple_crown_with_a_race_to_go_is_not_stored(monkeypatch):
+    """Same trap as a motocross round, one race deeper in."""
+    part = [(p, n, a, b, "---", "-") for p, n, a, b, _c, _t in _TC_ROWS]
+    rows, put = _scrape(monkeypatch, _triple_crown_page(part), 493648)
+    assert put == []
+    assert rows[0]["primary"] == "4-2"
+    assert rows[0]["primary_label"] == "MOTO 1 + MOTO 2"
+
+
+def test_the_parsers_verdict_beats_the_rows():
+    """Out of context "4-2" is a finished motocross round AND a Triple Crown
+    with a race still to run. Only the parser saw how many moto columns there
+    were, so a block carrying its verdict is judged on that, not re-read."""
+    ambiguous = ["4-2", "7-1", "1-5"]
+    assert _overall_block_is_settled(_blk(ambiguous))     # cached: rows only
+    assert not _overall_block_is_settled(dict(_blk(ambiguous), settled=False))
+    assert _overall_block_is_settled(dict(_blk(ambiguous), settled=True))
+    assert _overall_block_is_settled(_blk(["4-2-3", "7-1-2", "1-5-4"]))
