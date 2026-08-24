@@ -640,6 +640,43 @@ def _current_year() -> int:
 _EASTERN = ZoneInfo("America/New_York")
 
 
+_BC_TIME_RE = re.compile(r"^\s*(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?\s*$", re.I)
+
+
+def _stamp_broadcast(blocks, event_date):
+    """Give each broadcast window a real instant, not just "1 pm".
+
+    The blocks ARE the day's shape to a fan — qualifying from 10, racing from
+    1, the second motos on network at 3:30 — but "1 pm" is a string, and a
+    phone cannot count down to a string or know it has passed. Resolve it
+    against the event's own date in Eastern, where the series publishes it.
+
+    Only forwards. Round 1 of the SMX playoffs carries a "Sunday Encore 4 pm"
+    that belongs to the NEXT day; a block that would land before the one before
+    it is a block whose date we do not actually know, so it keeps its text and
+    gets no timestamp rather than a confidently wrong one.
+    """
+    if not blocks or not event_date:
+        return blocks
+    last = None
+    for b in blocks:
+        m = _BC_TIME_RE.match(b.get("time_et") or "")
+        if not m:
+            continue
+        hour = int(m.group(1)) % 12
+        if m.group(3).lower() == "p":
+            hour += 12
+        et = datetime.datetime.combine(
+            event_date, datetime.time(hour, int(m.group(2) or 0)), _EASTERN)
+        if last is not None and et <= last:
+            continue          # out of order: a different day, and we can't say which
+        last = et
+        b["start_utc"] = et.astimezone(datetime.timezone.utc).isoformat()
+        b["time_label"] = (f"{et.hour % 12 or 12}:{et.minute:02d} "
+                           f"{'AM' if et.hour < 12 else 'PM'}")
+    return blocks
+
+
 def _decorate_event(row: dict) -> dict:
     """Add start_time_et (display string) and parse the broadcast JSON."""
     utc = row.get("start_time_utc")
@@ -657,6 +694,7 @@ def _decorate_event(row: dict) -> dict:
             row["broadcast"] = json.loads(row["broadcast"]) if row["broadcast"] else None
         except (TypeError, ValueError):
             row["broadcast"] = None
+        row["broadcast"] = _stamp_broadcast(row["broadcast"], row.get("event_date"))
     return row
 
 
@@ -2505,12 +2543,18 @@ def widget_standings():
             elif state == "finished":
                 label += " · final"
             # Key is "class" (not "klass") — that's what the widget decodes.
-            return {"live": True,
+            return {"live": True, "next_gate_utc": None,
                     "series_long": ((lp.get("event") or {}).get("venue")
                                     or "Race day"),
                     "classes": [{"class": label, "top5": rows}]}
     rd = rundown()
+    # When the next gates drop. iOS rations widget refreshes by the day, so the
+    # widget spends them near the racing and coasts through a quiet week — but
+    # only the server knows when that is.
+    nxt = next_events(limit=1)
+    gate = (nxt[0].get("start_time_utc") if nxt else None)
     return {"live": False, "series_long": rd.get("series_long"),
+            "next_gate_utc": gate.isoformat() if gate else None,
             "classes": rd.get("classes")}
 
 
