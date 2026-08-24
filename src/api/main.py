@@ -1430,6 +1430,41 @@ def _cached_session_results(sid, p):
     return _db_cache_get(f"{p}:{sid}")
 
 
+# How much faster than the field's leading group a lap may be before we stop
+# believing it, and how big a field we need before judging at all.
+_LAP_OUTLIER_MARGIN = 0.07
+_LAP_OUTLIER_MIN_FIELD = 6
+
+
+def _credible_lap_floor(all_secs):
+    """The fastest a lap can credibly be, judged against the rest of the field.
+
+    In the closing seconds of 250 qualifying at Budds Creek the feed published
+    "#180 Landen Gordon new fastest lap of 1:45.742" — eleven seconds clear of a
+    field covered by under two. The official result has him fourth on 1:57.173.
+    We took it, made him P1, and posted the session COMPLETE with the wrong
+    winner and every gap wrong behind it. One bad number rewrote a session.
+
+    Measured against the MEDIAN of the leading group, deliberately:
+      - a median shrugs off the very outlier we are hunting, where a mean would
+        be dragged toward it and help it look reasonable;
+      - the leading group rather than the whole field, because a combined board
+        merges factory riders with privateers several seconds slower, and their
+        pace would drop the bar far enough for a bogus lap to clear it.
+
+    Returns None when the field is too small to judge — better to publish an odd
+    lap than to start rejecting real ones off two data points.
+    """
+    clean = sorted(s for s in all_secs
+                   if isinstance(s, (int, float)) and s > 0)
+    if len(clean) < _LAP_OUTLIER_MIN_FIELD:
+        return None
+    lead = clean[:10]
+    mid = len(lead) // 2
+    median = lead[mid] if len(lead) % 2 else (lead[mid - 1] + lead[mid]) / 2
+    return median * (1 - _LAP_OUTLIER_MARGIN)
+
+
 def _combined_qualifying(race_name, live_riders):
     """One class-wide qualifying board (best lap across both groups), or None."""
     if not race_name or "qualif" not in race_name.lower():
@@ -1439,19 +1474,26 @@ def _combined_qualifying(race_name, live_riders):
         return None
     cls = m.group(1)
 
-    best = {}   # number -> merged best-lap record
+    # Every lap each rider is credited with, kept rather than reduced to a best
+    # straight away. A rider's fastest lap can be the bogus one, and throwing
+    # the rider away with it would have deleted Landen Gordon from the board he
+    # legitimately sat fourth on.
+    cand = {}   # number -> {name, manufacturer, team, on_track, laps[]}
 
     def add(number, name, secs, manu, team, on_track):
         number = (str(number or "")).strip()
         if not number or secs is None:
             return
-        cur = best.get(number)
-        if cur is None or secs < cur["secs"]:
-            best[number] = {"number": number, "name": name, "secs": secs,
-                            "manufacturer": manu, "team": team,
-                            "on_track": on_track or (cur["on_track"] if cur else False)}
-        elif cur:
-            cur["on_track"] = cur["on_track"] or on_track
+        rec = cand.setdefault(number, {"number": number, "name": name,
+                                       "manufacturer": manu, "team": team,
+                                       "on_track": False, "laps": []})
+        rec["laps"].append(secs)
+        rec["on_track"] = rec["on_track"] or bool(on_track)
+        # First non-empty wins: the live feed and the posted results disagree on
+        # spelling, and a later blank must not wipe a name we already have.
+        for key, val in (("name", name), ("manufacturer", manu), ("team", team)):
+            if val and not rec.get(key):
+                rec[key] = val
 
     for r in (live_riders or []):
         add(r.get("number"), r.get("name"), _lap_to_secs(r.get("best_lap")),
@@ -1468,6 +1510,19 @@ def _combined_qualifying(race_name, live_riders):
         for row in ((res or {}).get("results") or []):
             add(row.get("number"), row.get("name"), _lap_to_secs(row.get("primary")),
                 row.get("manufacturer"), row.get("team"), False)
+
+    # Now that the whole field is in, we can tell a great lap from a fictional
+    # one. A rider whose only lap is rejected drops off the board; a rider with
+    # a real lap behind the bogus one keeps the real one.
+    floor = _credible_lap_floor([s for rec in cand.values() for s in rec["laps"]])
+    best = {}
+    for number, rec in cand.items():
+        laps = [s for s in rec["laps"] if floor is None or s >= floor]
+        if not laps:
+            continue
+        entry = {k: v for k, v in rec.items() if k != "laps"}
+        entry["secs"] = min(laps)
+        best[number] = entry
 
     if not best:
         return None
