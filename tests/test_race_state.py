@@ -20,11 +20,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.api.main import (  # noqa: E402
+    _feed_is_stalled,
     _gate_alert_key,
     _gate_alert_worthy,
     _is_final_race_of_day,
     _race_finished,
     _race_started,
+    _order_signature,
     _site_shows_this_round,
 )
 
@@ -259,3 +261,73 @@ def test_the_race_name_is_normalised():
 def test_two_rounds_never_share_a_key():
     assert (_gate_alert_key(27, "450 Moto #2", "2026-08-22")
             != _gate_alert_key(28, "450 Moto #2", "2026-08-22"))
+
+
+# --- has this session stopped being real? ------------------------------------
+#
+# Budds Creek produced two lies with the same shape. WMX Moto 1 ran out and the
+# feed sat there with no checkered we could see, so the app said LIVE for three
+# hours after the riders had left. And the provider publishes a grid a DAY
+# early: Saturday's 8 AM qualifying was on the lock screen at 11:51 PM Friday.
+# Both look identical — a clock that isn't counting and an order that has
+# stopped moving — so only elapsed time tells them apart from a real race.
+
+def grid(*, laps=0, remaining=1800, n=5):
+    return {
+        "riders": [{"position": i, "number": str(100 + i), "laps": laps}
+                   for i in range(1, n + 1)],
+        "clock": {"remaining": remaining},
+    }
+
+
+def test_a_running_clock_is_never_stalled():
+    """The single most important guard: a real race must never be retired."""
+    assert _feed_is_stalled(grid(laps=4, remaining=600), 99999, "racing") is False
+    assert _feed_is_stalled(grid(remaining=1800), 99999, "staged") is False
+
+
+def test_a_dead_clock_alone_does_not_end_a_race():
+    """The clock hits zero before the leader takes the flag — a moto runs
+    'time plus two laps'. Retiring on the clock alone would cut the finish off."""
+    assert _feed_is_stalled(grid(laps=8, remaining=0), 30, "racing") is False
+
+
+def test_a_dead_clock_and_a_frozen_order_ends_it():
+    """WMX Moto 1: no time left, nobody moving, and the feed never said so."""
+    assert _feed_is_stalled(grid(laps=8, remaining=0), 600, "racing") is True
+
+
+def test_a_grid_nobody_has_touched_for_half_an_hour_is_not_a_gate():
+    """Friday 11:51 PM, showing Saturday's 8 AM qualifying 'on the gate'."""
+    assert _feed_is_stalled(grid(remaining=0), 3600, "staged") is True
+
+
+def test_a_freshly_staged_grid_is_still_a_gate():
+    """Riders really are sitting on the gate — don't hide the session."""
+    assert _feed_is_stalled(grid(remaining=0), 60, "staged") is False
+
+
+def test_staged_is_given_far_longer_than_racing():
+    """A gate can legitimately sit for a while; a finished race cannot."""
+    assert _feed_is_stalled(grid(remaining=0), 300, "racing") is True
+    assert _feed_is_stalled(grid(remaining=0), 300, "staged") is False
+
+
+def test_the_signature_moves_when_the_race_does():
+    a = _order_signature(grid(laps=3))
+    assert a == _order_signature(grid(laps=3))       # parked
+    assert a != _order_signature(grid(laps=4))       # a lap completed
+
+
+def test_the_signature_ignores_jittering_gaps():
+    """Gaps twitch by thousandths even with the field parked. Reading those as
+    movement would keep a dead feed looking alive forever."""
+    a = grid(laps=2); b = grid(laps=2)
+    a["riders"][0]["gap"] = "1.001"
+    b["riders"][0]["gap"] = "1.002"
+    assert _order_signature(a) == _order_signature(b)
+
+
+def test_a_missing_clock_counts_as_dead():
+    t = grid(laps=6); t["clock"] = {}
+    assert _feed_is_stalled(t, 600, "racing") is True

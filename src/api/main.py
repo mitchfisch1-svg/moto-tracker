@@ -1290,6 +1290,77 @@ def _race_finished(timing) -> bool:
     return False
 
 
+# How long a session can sit completely motionless before we stop believing it.
+# Two different lies were being told at Budds Creek and both look like this:
+#   - WMX Moto 1 ran out and the feed simply sat there. No checkered we could
+#     see, so `racing` never cleared and the app said LIVE for three hours after
+#     the riders had left the track.
+#   - The provider publishes a grid — everyone on zero laps, full clock — as
+#     much as a DAY early. Saturday's 8 AM qualifying was on the lock screen at
+#     11:51 PM Friday, and Saturday's WMX Moto 2 was "on the gate" all Friday
+#     afternoon.
+# A finished session and a long-published grid are the same shape: a clock that
+# isn't counting and an order that has stopped moving. Time is the only thing
+# that separates either from a real race.
+_STALL_RACING_S = 240      # 4 min frozen after the clock dies = it's over
+_STALL_STAGED_S = 1800     # 30 min of an unchanged grid = not a real gate
+
+
+def _order_signature(timing) -> str:
+    """The running order as one comparable string.
+
+    Position, number and lap count for the front of the field — enough that any
+    real racing changes it, and nothing else does. Deliberately not the gaps:
+    those jitter by thousandths even when the field is parked, which would make
+    a dead feed look alive forever.
+    """
+    return "|".join(
+        f"{r.get('position')}:{r.get('number')}:{r.get('laps')}"
+        for r in (timing.get("riders") or [])[:12])
+
+
+def _clock_is_ticking(timing) -> bool:
+    clock = timing.get("clock") or {}
+    try:
+        return float(clock.get("remaining") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _feed_is_stalled(timing, unchanged_for_s: float, state: str) -> bool:
+    """Has this session stopped being real?
+
+    `unchanged_for_s` is how long the running order has looked exactly like it
+    does now. A racing session that has run out of clock and stopped moving is
+    finished. A staged grid nobody has touched in half an hour was published
+    early and is not on the gate.
+    """
+    if _clock_is_ticking(timing):
+        return False
+    limit = _STALL_STAGED_S if state == "staged" else _STALL_RACING_S
+    return unchanged_for_s >= limit
+
+
+# Per-race memory of when the order last actually changed. Keyed by race name so
+# the next session starts its own clock rather than inheriting the last one's.
+_ORDER_WATCH: dict = {}
+_ORDER_WATCH_LOCK = threading.Lock()
+
+
+def _unchanged_for(race_name: str, signature: str, now: float) -> float:
+    """Seconds this race's order has looked exactly like this."""
+    key = str(race_name or "")
+    with _ORDER_WATCH_LOCK:
+        prev = _ORDER_WATCH.get(key)
+        if prev is None or prev[0] != signature:
+            _ORDER_WATCH[key] = (signature, now)
+            if len(_ORDER_WATCH) > 40:        # a race weekend is ~25 sessions
+                for k in list(_ORDER_WATCH)[:10]:
+                    _ORDER_WATCH.pop(k, None)
+            return 0.0
+        return now - prev[1]
+
+
 def _is_final_race_of_day(race_name, series) -> bool:
     pat = _FINAL_RACE_RE.get(str(series or "").upper())
     return bool(pat and race_name and pat.search(str(race_name)))
@@ -1558,6 +1629,18 @@ def live(demo: bool = False):
         timing["race_state"] = "racing"
     else:
         timing["race_state"] = "staged"
+
+    # ...and then check whether that state is still TRUE. The feed states what
+    # it last published, not what is happening now, so a session it never closed
+    # stays "racing" and a grid it published a day early stays "staged". Both
+    # are betrayed by an order that has stopped moving against a dead clock.
+    idle = _unchanged_for(timing.get("race_name"), _order_signature(timing),
+                          time.time())
+    if not is_demo and _feed_is_stalled(timing, idle, timing["race_state"]):
+        if timing["race_state"] == "racing":
+            timing["race_state"] = "finished"   # ran out and everyone went home
+        else:
+            timing["stale_grid"] = True         # published early; nothing is on
 
     # Qualifying: also expose the class-wide combined board (both groups by best
     # lap), which is what the broadcast shows and what fans actually want.
