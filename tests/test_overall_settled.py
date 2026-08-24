@@ -156,3 +156,123 @@ def test_the_half_round_is_not_held_for_six_hours(monkeypatch):
     expires, _ = main._SESSIONS_CACHE[("view_multi_main_result", 1017646)]
     assert expires - main.time.time() <= main._OVERALL_PROVISIONAL_TTL
     assert main._OVERALL_PROVISIONAL_TTL < main._SESSION_RESULT_TTL
+
+
+# --- the event board ---------------------------------------------------------
+# Budds Creek ran three classes, so /events/27 owes three Overalls. The site
+# posts each class's link when that class's second moto is scored — and the
+# last of those lands minutes after the event is already over.
+_SMX = 515268
+_LINKS = {"250": 1019488, "450": 1019512, "WMX": 1019066}
+
+
+def _event_page(classes):
+    return "".join(
+        f'<a href="/results/?p=view_multi_main_result&amp;id={_LINKS[c]}">'
+        f'{c} Overall Results</a>' for c in classes)
+
+
+def _fetch(monkeypatch, posted, *, stored=None, status="final",
+           expected_classes=3, half=()):
+    """One /events/{id} Overall build. `posted` is the classes the site links;
+    `half` is the subset whose second moto has not run."""
+    from src.api import main
+
+    main._SESSIONS_CACHE.clear()
+    put = {}
+    by_race = {_LINKS[c]: c for c in posted}
+
+    def fake_results(race_id, p=None, **kw):
+        cls = by_race[race_id]
+        primaries = HALF_450 if cls in half else FINAL_450
+        return {"results": _board(primaries)}
+
+    monkeypatch.setattr(main.requests, "get",
+                        lambda *a, **k: _Resp(_event_page(posted)))
+    monkeypatch.setattr(main, "live_session_results", fake_results)
+    monkeypatch.setattr(main, "_db_cache_get", lambda key: stored)
+    monkeypatch.setattr(main, "_db_cache_put",
+                        lambda key, payload: put.setdefault(key, payload))
+    out = main._event_overall(
+        f"https://results.supermotocross.com/results/?p=view_event&id={_SMX}",
+        status, expected_classes)
+    return out, put
+
+
+def test_a_class_the_site_has_not_posted_yet_is_not_the_final_board(monkeypatch):
+    """The 450's Overall link lands after the event is already final. Storing
+    the board in that gap would lose the 450 — on the round that decides it."""
+    out, put = _fetch(monkeypatch, ["250", "WMX"])
+    assert [b["label"] for b in out] == ["250 Overall Results",
+                                         "WMX Overall Results"]
+    assert put == {}
+
+
+def test_the_late_class_joins_the_board_instead_of_replacing_it(monkeypatch):
+    """250 and WMX were already banked. When the 450 finally appears the board
+    is all three — not the one class this scrape happened to see."""
+    banked = [{"label": f"{c} Overall Results", "race_id": _LINKS[c],
+               "rows": _board(FINAL_450)} for c in ("250", "WMX")]
+    out, put = _fetch(monkeypatch, ["450"], stored=banked)
+    assert [b["label"] for b in out] == ["250 Overall Results",
+                                         "450 Overall Results",
+                                         "WMX Overall Results"]
+    assert f"overall:{_SMX}" in put
+
+
+def test_the_whole_board_is_stored_once_the_round_is_done(monkeypatch):
+    out, put = _fetch(monkeypatch, ["250", "450", "WMX"])
+    assert len(out) == 3
+    assert len(put[f"overall:{_SMX}"]) == 3
+
+
+def test_one_half_finished_class_holds_the_whole_board_back(monkeypatch):
+    """This is what /events/27 served: two real Overalls and WMX a moto short,
+    stored together as the round's result."""
+    out, put = _fetch(monkeypatch, ["250", "450", "WMX"], half=("WMX",))
+    assert len(out) == 3, "the moto-1 order should still be shown"
+    assert put == {}
+
+
+def test_nothing_is_stored_while_the_round_is_still_running(monkeypatch):
+    out, put = _fetch(monkeypatch, ["250", "450", "WMX"], status="live")
+    assert len(out) == 3
+    assert put == {}
+
+
+def test_a_complete_stored_board_is_served_without_scraping(monkeypatch):
+    from src.api import main
+
+    banked = [{"label": f"{c} Overall Results", "race_id": _LINKS[c],
+               "rows": _board(FINAL_450)} for c in ("250", "450", "WMX")]
+    main._SESSIONS_CACHE.clear()
+    monkeypatch.setattr(main, "_db_cache_get", lambda key: banked)
+
+    def boom(*a, **k):
+        raise AssertionError("re-scraped a board that was already complete")
+
+    monkeypatch.setattr(main.requests, "get", boom)
+    out = main._event_overall(
+        f"https://results.supermotocross.com/results/?p=view_event&id={_SMX}",
+        "final", 3)
+    assert len(out) == 3
+
+
+def test_the_stored_board_survives_the_site_going_down(monkeypatch):
+    """Two classes banked, the third still missing, and the results site is
+    unreachable. Show what we have rather than nothing."""
+    from src.api import main
+
+    banked = [{"label": f"{c} Overall Results", "race_id": _LINKS[c],
+               "rows": _board(FINAL_450)} for c in ("250", "WMX")]
+    main._SESSIONS_CACHE.clear()
+    monkeypatch.setattr(main, "_db_cache_get", lambda key: banked)
+
+    def down(*a, **k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(main.requests, "get", down)
+    out = main._event_overall(
+        f"https://results.supermotocross.com/results/?p=view_event&id={_SMX}",
+        "final", 3)
+    assert len(out) == 2

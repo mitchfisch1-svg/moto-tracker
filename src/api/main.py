@@ -2803,7 +2803,7 @@ def _overall_block_is_settled(rows) -> bool:
          for r in rows])
 
 
-def _event_overall(source_url, event_status=None):
+def _event_overall(source_url, event_status=None, expected_classes=0):
     """The round's OVERALL result — both motos combined, as the series scores it.
 
     Per-moto results answer "who won that moto". They do not answer "who won the
@@ -2813,20 +2813,20 @@ def _event_overall(source_url, event_status=None):
     finishes and the points they add up to, so take that rather than adding
     motos up ourselves — the same reasoning that fixed the standings.
 
-    Persisted in the database once the round is over. The results site only
-    serves an event while it is current, so without keeping this the Overall
-    would vanish the moment the next round goes on track — which is exactly
-    when someone wants to look back at it. Only the finished board earns that,
-    though: this cache has no expiry, so anything stored mid-round is stored
-    for good.
+    Persisted in the database once the round is over — every class that raced,
+    each with both motos. The results site only serves an event while it is
+    current, so without keeping this the Overall would vanish the moment the
+    next round goes on track, which is exactly when someone wants to look back
+    at it. Only the finished board earns that, though: this cache has no
+    expiry, so anything stored mid-round is stored for good.
     """
     smx = _event_smx_id(source_url)
     if not smx:
         return []
     key = f"overall:{smx}"
-    cached = _db_cache_get(key)
-    if cached is not None:
-        return cached
+    stored = _db_cache_get(key) or []
+    if stored and len(stored) >= max(expected_classes, 1):
+        return stored           # every class that raced is on the board
     # Re-scraping the link page per request would be brutal on race day, when
     # the board is deliberately not being persisted. Hold it in memory instead.
     mem_key = ("overall", smx)
@@ -2839,7 +2839,7 @@ def _event_overall(source_url, event_status=None):
                             headers=_LRM_HEADERS, timeout=20)
         page.raise_for_status()
     except Exception:
-        return []
+        return stored     # the site is down; a partial board beats no board
 
     out = []
     seen = set()
@@ -2856,19 +2856,28 @@ def _event_overall(source_url, event_status=None):
         if rows:
             out.append({"label": label, "race_id": race_id, "rows": rows})
 
-    # Persist only the round's finished answer. Two ways this is not one yet:
-    # a class whose second moto has not run, and a class whose Overall link the
-    # site has not posted at all — at noon the page may list 250 only, and this
-    # key has no expiry, so a board saved then is the board forever. Requiring
-    # the event to be final covers the second case, which the rows cannot show.
-    settled = (bool(out)
-               and event_status == "final"
-               and all(_overall_block_is_settled(b["rows"]) for b in out))
-    if settled:
-        _db_cache_put(key, out)
+    # A class is missing from `out` two ways: its second moto has not run, or
+    # the site has not posted its Overall link yet — at noon the page may list
+    # 250 only, and the 450's link lands minutes after the last moto, which is
+    # exactly when everyone is looking. So merge rather than replace: a class
+    # already banked stays banked, and a class that arrives later joins it.
+    blocks = {b["race_id"]: b for b in stored}   # everything stored is settled
+    for b in out:
+        if b["race_id"] not in blocks or _overall_block_is_settled(b["rows"]):
+            blocks[b["race_id"]] = b            # never trade down to half a board
+    shown = sorted(blocks.values(), key=lambda b: b["label"])
+
+    # Persist only the round's finished answer: every class that raced, each
+    # with both motos. This key has no expiry, so what goes in is what the
+    # round is remembered as long after the site has stopped serving it.
+    if (shown and event_status == "final"
+            and len(shown) >= max(expected_classes, 1)
+            and all(_overall_block_is_settled(b["rows"]) for b in shown)):
+        _db_cache_put(key, shown)
     else:
-        _SESSIONS_CACHE[mem_key] = (time.time() + _OVERALL_PROVISIONAL_TTL, out)
-    return out
+        _SESSIONS_CACHE[mem_key] = (time.time() + _OVERALL_PROVISIONAL_TTL,
+                                    shown)
+    return shown
 
 
 @app.get("/events/{event_id}")
@@ -2889,12 +2898,16 @@ def event(event_id: int):
         raise HTTPException(status_code=404, detail="event not found")
     source_url = info[0].pop("source_url", None)
     info[0]["track_map"] = _event_track_map(source_url)
-    # Both motos combined — who actually won the round, not just each moto.
-    info[0]["overall"] = _event_overall(source_url, info[0].get("status"))
     sessions = query(
         "SELECT id, class, type, label FROM sessions WHERE event_id = %s ORDER BY id",
         [event_id],
     )
+    # Both motos combined — who actually won the round, not just each moto.
+    # The classes that raced tell us how many Overalls to expect: MX runs 250
+    # and 450, plus WMX on the rounds it supports.
+    info[0]["overall"] = _event_overall(
+        source_url, info[0].get("status"),
+        len({s["class"] for s in sessions if s["class"]}))
     results = query(
         """
         SELECT sess.id AS session_id, sess.class, sess.label, res.position,
