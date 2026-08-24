@@ -29,6 +29,7 @@ from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
 from ..apns import apns_ready, send_live_activity
+from ..names import display_surname, titlecase_name
 from ..config import get_database_url
 from ..notify import notify_work
 
@@ -392,13 +393,13 @@ def _la_content_state(payload):
     cq = t.get("combined_qualifying")
     if cq:
         riders = [
-            {"p": r.get("position"), "n": (r.get("name") or "").split(" ")[-1],
+            {"p": r.get("position"), "n": display_surname(r.get("name")),
              "num": str(r.get("number") or ""), "g": (r.get("best_lap") or "")[:12]}
             for r in (cq.get("riders") or [])[:5]
         ]
     else:
         riders = [
-            {"p": r.get("position"), "n": (r.get("name") or "").split(" ")[-1],
+            {"p": r.get("position"), "n": display_surname(r.get("name")),
              "num": str(r.get("number") or ""), "g": (r.get("gap") or "")[:12]}
             for r in (t.get("riders") or [])[:5]
         ]
@@ -2027,7 +2028,7 @@ def live_session_results(race_id: int, p: str = "view_race_result",
             "position": int(cells[0]) if cells[0].isdigit() else None,
             "status": "finished" if cells[0].isdigit() else cells[0].lower(),
             "number": (cells[1] or "").strip() or None,
-            "name": name.title(),
+            "name": titlecase_name(name),
             "primary_label": primary_label,
             "primary": primary,
             "secondary_label": secondary_label,
@@ -2203,7 +2204,7 @@ def live_entries(event_id: int, class_id: int):
             team = (cells[4] or "").strip() or None
             rows.append({
                 "number": cells[0],
-                "name": (cells[2] or "").title(),
+                "name": titlecase_name(cells[2] or ""),
                 "hometown": (cells[3] or "").strip() or None,
                 "team": team,
                 "manufacturer": _make_from_team(team),

@@ -64,7 +64,7 @@ def display_name(raw: str) -> str:
         return ""
     s = _TAG_RE.sub(" ", raw)
     s = re.sub(r"\s+", " ", s).strip()
-    return s.title() if s == s.upper() else s
+    return titlecase_name(s)
 
 
 class RiderResolver:

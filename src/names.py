@@ -51,3 +51,50 @@ def slug_variants(full_name: str) -> list[str]:
         if candidate and candidate not in variants:
             variants.append(candidate)
     return [v for v in variants if v]
+
+
+# Suffixes a plain .title() mangles. "III" becomes "Iii", which is how the app
+# ended up listing a rider called "Will Canaguier Iii".
+_NAME_SUFFIXES = {"II", "III", "IV", "V", "VI", "JR", "SR"}
+
+
+def titlecase_name(raw):
+    """Title-case a SHOUTED name without wrecking suffixes and Mc- prefixes.
+
+    Results arrive upper-cased, so they have to be re-cased for display. A bare
+    .title() gets the ordinary cases right and the interesting ones wrong:
+    "III" -> "Iii", "MCGRATH" -> "Mcgrath". A name that already carries mixed
+    case is left alone — the source knew what it meant.
+    """
+    if not raw:
+        return raw
+    s = str(raw)
+    if s != s.upper():
+        return s
+    out = []
+    for word in s.split(" "):
+        bare = word.strip(".").upper()
+        if not word:
+            out.append(word)
+        elif bare in _NAME_SUFFIXES:
+            out.append(word.upper())               # III, JR. stay shouted
+        elif bare.startswith("MC") and len(bare) > 3:
+            out.append("Mc" + word[2:].title())    # McGrath, not Mcgrath
+        else:
+            out.append(word.title())               # O'BRIEN -> O'Brien
+    return " ".join(out)
+
+
+def display_surname(full):
+    """The name to show when there is only room for one word.
+
+    "Tre Fierro III" must not render as "III". A lock screen listing a rider
+    called III is exactly the kind of detail that makes a whole board look
+    untrustworthy, so a suffix brings the real surname along with it.
+    """
+    parts = [p for p in str(full or "").split() if p]
+    if not parts:
+        return ""
+    if len(parts) > 1 and parts[-1].strip(".").upper() in _NAME_SUFFIXES:
+        return " ".join(parts[-2:])                # "Fierro III"
+    return parts[-1]
