@@ -2543,7 +2543,8 @@ def widget_standings():
             elif state == "finished":
                 label += " · final"
             # Key is "class" (not "klass") — that's what the widget decodes.
-            return {"live": True, "next_gate_utc": None,
+            return {"live": True, "next_gate_utc": None, "next_venue": None,
+                    "next_start_et": None,
                     "series_long": ((lp.get("event") or {}).get("venue")
                                     or "Race day"),
                     "classes": [{"class": label, "top5": rows}]}
@@ -2555,6 +2556,10 @@ def widget_standings():
     gate = (nxt[0].get("start_time_utc") if nxt else None)
     return {"live": False, "series_long": rd.get("series_long"),
             "next_gate_utc": gate.isoformat() if gate else None,
+            "next_venue": (nxt[0].get("venue") if nxt else None),
+            # The display string too: the widget should draw what it is given,
+            # not re-derive Eastern time on a device in another zone.
+            "next_start_et": (nxt[0].get("start_time_et") if nxt else None),
             "classes": rd.get("classes")}
 
 
