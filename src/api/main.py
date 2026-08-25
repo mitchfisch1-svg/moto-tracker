@@ -3103,6 +3103,15 @@ _PODCAST_FEEDS = [
     ("Gypsy Tales",      "https://rss.art19.com/gypsy-tales"),
     ("Swapmoto Live",    "https://www.podserve.fm/series/rss/20/swapmoto-live-podcast.rss"),
     ("Whiskey Throttle", "https://anchor.fm/s/dbada008/podcast/rss"),
+    # The riders' own shows and the race-weekend analysis, added 2026-08-24.
+    ("Title 24",         "https://www.omnycontent.com/d/playlist/"
+                         "006cbbeb-1b7a-4729-b380-b3df0127e8db/"
+                         "abca8ab4-52fa-42a6-b48b-b3df0134b5e5/"
+                         "1b3e1524-6aab-4504-983e-b3df0134b5ec/podcast.rss"),
+    ("The AC & JB Show", "https://rss.buzzsprout.com/2446503.rss"),
+    ("Fly Racing Moto:60", "https://www.pulpmx.com/apptabs/z_pmxpreshow.xml"),
+    ("Industry Seating", "https://www.pulpmx.com/apptabs/industryseating.xml"),
+    ("Vital MX",         "https://rss.buzzsprout.com/184926.rss"),
 ]
 # Back catalogues are enormous (Steve Matthes alone has 2,700+ episodes), so we
 # only keep the newest few per show and cache hard — new episodes are weekly.
@@ -3151,7 +3160,13 @@ def _podcast_episodes(show: str, feed_url: str):
     from html import unescape
     out = []
     try:
-        body = requests.get(feed_url, timeout=25).text
+        # Send a User-Agent. Buzzsprout answers an anonymous request with 403
+        # and 4KB of error HTML, which has no <item> in it — so the show came
+        # back as "no episodes" rather than as a failure, and simply was not
+        # there. A whole podcast can go missing this quietly.
+        resp = requests.get(feed_url, headers=_LRM_HEADERS, timeout=25)
+        resp.raise_for_status()
+        body = resp.text
         art = _POD_IMG_RE.search(body)          # channel art precedes the items
         artwork = art.group(1) if art else None
         for block in _POD_ITEM_RE.findall(body)[:_POD_PER_SHOW]:
@@ -3190,7 +3205,9 @@ def podcasts(limit: int = 40):
     if hit and hit[0] > time.time():
         return hit[1][:limit]
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    # One worker per show: the list is short and every fetch is a
+    # different host, so they all wait on the network together.
+    with ThreadPoolExecutor(max_workers=len(_PODCAST_FEEDS)) as ex:
         futs = [ex.submit(_podcast_episodes, n, u) for n, u in _PODCAST_FEEDS]
         items = [e for f in futs for e in f.result()]
 
