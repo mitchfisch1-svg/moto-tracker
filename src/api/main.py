@@ -2948,6 +2948,66 @@ def _overall_block_is_settled(block) -> bool:
          for r in block.get("rows") or []])
 
 
+_COMBQUAL_LABEL_RE = re.compile(
+    r'href="[^"]*view_combined_round_ranking&(?:amp;)?id=(\d+)&(?:amp;)?rt=(\d+)'
+    r'&(?:amp;)?class_id=(\d+)"[^>]*>(.*?)</a>', re.S)
+
+
+def _event_qualifying(source_url):
+    """The round's COMBINED qualifying — the official gate-pick order.
+
+    Group A and Group B merged into one board by best lap, which is the result
+    that actually decides where a rider lines up. The per-group sessions are on
+    the Race Day tab while the day is running; what belongs on a finished
+    round's page is the answer the day produced.
+
+    Immutable once posted, like any finished session, so this is cached the
+    same way — and, like the Overall, it has to be kept, because the results
+    site stops serving a round the moment the next one goes on track.
+    """
+    smx = _event_smx_id(source_url)
+    if not smx:
+        return []
+    key = f"qualifying:{smx}"
+    stored = _db_cache_get(key)
+    if stored is not None:
+        return stored
+    mem_key = ("qualifying", smx)
+    live = _sessions_cache_get(mem_key)
+    if live is not None:
+        return live
+
+    try:
+        page = requests.get(f"{_RESULTS_HOME}?p=view_event&id={smx}",
+                            headers=_LRM_HEADERS, timeout=20)
+        page.raise_for_status()
+    except Exception:
+        return []
+
+    out, seen = [], set()
+    for event_id, rt, class_id, raw_label in _COMBQUAL_LABEL_RE.findall(page.text):
+        label = re.sub(r"<[^>]+>", "", raw_label).strip()
+        if not label or class_id in seen:
+            continue          # each link appears twice: the row and its PDF
+        seen.add(class_id)
+        try:
+            res = live_session_results(int(class_id),
+                                       p="view_combined_round_ranking",
+                                       event_id=int(event_id), rt=int(rt))
+        except Exception:
+            continue
+        rows = (res or {}).get("results") or []
+        if rows:
+            out.append({"label": label, "class_id": class_id, "rows": rows})
+    out.sort(key=lambda b: b["label"])
+
+    if out:
+        _db_cache_put(key, out)
+    else:
+        _SESSIONS_CACHE[mem_key] = (time.time() + _OVERALL_PROVISIONAL_TTL, out)
+    return out
+
+
 def _event_overall(source_url, event_status=None, expected_classes=0):
     """The round's OVERALL result — both motos combined, as the series scores it.
 
@@ -3054,6 +3114,10 @@ def event(event_id: int):
     info[0]["overall"] = _event_overall(
         source_url, info[0].get("status"),
         len({s["class"] for s in sessions if s["class"]}))
+    # The gate-pick order the morning produced. Not in `sessions`: the results
+    # pipeline ingests races, which is what scores a championship, so a
+    # finished round's page had no qualifying on it at all.
+    info[0]["qualifying"] = _event_qualifying(source_url)
     results = query(
         """
         SELECT sess.id AS session_id, sess.class, sess.label, res.position,
