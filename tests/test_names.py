@@ -69,3 +69,23 @@ def test_a_single_word_is_its_own_surname():
 def test_nothing_in_nothing_out():
     assert display_surname("") == ""
     assert display_surname(None) == ""
+
+
+# --- a shouted name the source did not shout consistently --------------------
+def test_a_lowercase_accent_inside_capitals_is_still_shouting():
+    """The results site writes Cornelius Tondel with a LOWERCASE o-slash inside
+    an otherwise capitalised name. `s == s.upper()` therefore said "already
+    mixed case, leave it alone", and the rider was stored shouted — in six
+    cached boards, including ones scraped the day before this was found."""
+    assert titlecase_name("CORNELIUS T\u00f8NDEL") == "Cornelius T\u00f8ndel"
+
+
+def test_a_genuinely_mixed_case_source_is_still_left_alone():
+    assert titlecase_name("Cornelius T\u00f8ndel") == "Cornelius T\u00f8ndel"
+    assert titlecase_name("Jos\u00e9 Butr\u00f3n") == "Jos\u00e9 Butr\u00f3n"
+
+
+def test_the_ordinary_cases_did_not_move():
+    assert titlecase_name("HAIDEN DEEGAN") == "Haiden Deegan"
+    assert titlecase_name("WILL CANAGUIER III") == "Will Canaguier III"
+    assert titlecase_name("BAYLER MCKELLAR") == "Bayler McKellar"

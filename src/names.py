@@ -58,6 +58,18 @@ def slug_variants(full_name: str) -> list[str]:
 _NAME_SUFFIXES = {"II", "III", "IV", "V", "VI", "JR", "SR"}
 
 
+def _is_shouted(s: str) -> bool:
+    """Did the source write this name in capitals?
+
+    Judged on the ASCII letters alone, because those are the ones a results
+    sheet cases reliably. The site publishes Cornelius Tondel with a LOWERCASE
+    o-slash inside an otherwise shouted name, so `s == s.upper()` said no and
+    the rider was stored, and displayed, as "CORNELIUS ToNDEL" all season.
+    """
+    ascii_letters = [c for c in s if c.isascii() and c.isalpha()]
+    return bool(ascii_letters) and all(c.isupper() for c in ascii_letters)
+
+
 def titlecase_name(raw):
     """Title-case a SHOUTED name without wrecking suffixes and Mc- prefixes.
 
@@ -69,7 +81,7 @@ def titlecase_name(raw):
     if not raw:
         return raw
     s = str(raw)
-    if s != s.upper():
+    if not _is_shouted(s):
         return s
     out = []
     for word in s.split(" "):

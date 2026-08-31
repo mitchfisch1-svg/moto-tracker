@@ -1,0 +1,29 @@
+# Assert what must be true of PRODUCTION, hourly.
+#
+# The unit suite tests logic and has never caught a bug that reached a phone —
+# every one of those was a data bug: missing, stale, mis-keyed or mis-rendered.
+# This is the half that watches the data, so we hear about it before Mitch does.
+name: audit
+
+on:
+  schedule:
+    - cron: "40 * * * *"     # hourly, off the cron rush
+  workflow_dispatch:
+  push:
+    paths:
+      - "scripts/audit.py"
+      - "src/**"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-api.txt
+      - name: Check production invariants
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/audit.py
