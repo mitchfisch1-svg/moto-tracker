@@ -19,7 +19,7 @@ import re
 
 from rapidfuzz import fuzz, process
 
-from ..names import fold
+from ..names import fold, titlecase_name
 
 # Fuzzy score thresholds (0-100, RapidFuzz WRatio).
 HIGH_CONFIDENCE = 90   # >= this: treat as the same rider
