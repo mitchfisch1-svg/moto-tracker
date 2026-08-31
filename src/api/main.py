@@ -508,8 +508,11 @@ def _live_activity_loop():
         try:
             if apns_ready():
                 rows = query("SELECT token, kind FROM live_activity_tokens")
+                _LA_STATS["tokens"] = len(rows)
                 if rows:
+                    _cycle_started = time.time()
                     payload = live()
+                    _LA_STATS["live_ms"] = int((time.time() - _cycle_started) * 1000)
                     if payload.get("live") and payload.get("timing"):
                         state = _la_content_state(payload)
                         # iOS budgets frequent Live Activity updates and silently
@@ -522,6 +525,9 @@ def _live_activity_loop():
                             time.sleep(_LA_INTERVAL_S)
                             continue
                         last_state, last_push = state, time.time()
+                        _LA_STATS.update(
+                            last_push_at=last_push, race=state.get("race"),
+                            cycle_ms=int((last_push - _cycle_started) * 1000))
                         stale = []
                         # Once per event: remotely launch the activity on every
                         # phone that registered a push-to-start token (iOS 17.2+)
@@ -764,7 +770,24 @@ def health():
         query("SELECT 1")
     except Exception:
         raise HTTPException(status_code=503, detail="database unavailable")
-    return {"status": "ok", "db": True, "apns": apns_ready()}
+    return {"status": "ok", "db": True, "apns": apns_ready(),
+            "live_activity": _la_health()}
+
+
+def _la_health() -> dict:
+    """Enough to diagnose a stale lock screen WHILE it is stale."""
+    now = time.time()
+    last = _LA_STATS.get("last_push_at")
+    return {
+        "tokens": _LA_STATS.get("tokens"),
+        "last_push_race": _LA_STATS.get("race"),
+        "seconds_since_push": round(now - last, 1) if last else None,
+        # How long one cycle spends scraping. If this approaches the push
+        # interval the loop is the bottleneck, not Apple.
+        "live_call_ms": _LA_STATS.get("live_ms"),
+        "cycle_ms": _LA_STATS.get("cycle_ms"),
+        "push_interval_s": _LA_INTERVAL_S,
+    }
 
 
 # --- race-day weather (open-meteo, free, no key) -----------------------------
@@ -1405,6 +1428,13 @@ def _clock_is_ticking(timing) -> bool:
         return float(clock.get("remaining") or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+# What the lock-screen loop last did. The Live Activity lagged two minutes
+# behind the app at Ironman and a screenshot cannot say why: whether the loop
+# was slow, the push was skipped as unchanged, or APNs dropped it. These are
+# the three numbers that tell them apart, readable while the next race runs.
+_LA_STATS: dict = {}
 
 
 def _retire_round(event_id) -> None:
