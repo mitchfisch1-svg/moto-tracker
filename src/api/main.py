@@ -2123,8 +2123,17 @@ def live_session_results(race_id: int, p: str = "view_race_result",
     """
     if p not in _SESSION_VIEWS:
         raise HTTPException(status_code=400, detail="unknown results view")
-    cache_key = (p, race_id)
-    db_key = f"{p}:{race_id}"
+    # Combined Qualifying is addressed by CLASS id, not by session id — 55908
+    # is "the 250 class" and is the same number at every round of the season.
+    # Keyed on it alone, July's Southwick board was served as the combined
+    # qualifying for every round after it, for two months. The event and its
+    # round-type are what make it one session.
+    if p == "view_combined_round_ranking":
+        cache_key = (p, event_id, rt, race_id)
+        db_key = f"{p}:{event_id}:{rt}:{race_id}"
+    else:
+        cache_key = (p, race_id)
+        db_key = f"{p}:{race_id}"
     cached = _sessions_cache_get(cache_key)
     if cached is not None:
         return cached
