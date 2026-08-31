@@ -12,6 +12,7 @@ Points come only from the championship-scoring sessions:
 top, because the provider applies manual penalties we cannot derive.
 """
 
+import datetime
 import re
 
 # The points a finishing position is worth.
@@ -183,7 +184,7 @@ def _rider_index(conn):
 def apply_official_standings(conn, season_id: int | None = None) -> dict:
     """Overlay the series' own published points onto our computed standings.
 
-    Deliberately an OVERLAY, not a replacement. recompute_standings() still runs
+    Mostly an OVERLAY, not a replacement. recompute_standings() still runs
     first and still owns wins and podiums, which are unambiguous from results.
     This only corrects `points` and `position` — the two things the provider can
     state and we can only infer, because of point adjustments.
@@ -222,7 +223,7 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
         if not rows:
             report[f"{abbrev} {cls}"] = "unavailable"
             continue
-        changed = matched = unmatched = 0
+        changed = matched = unmatched = inserted = 0
         with conn.cursor() as cur:
             for r in rows:
                 rider_id = index.get(match_key(r["rider"]))
@@ -244,11 +245,32 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
                     + ((season_id,) if season_id is not None else ()),
                 )
                 changed += cur.rowcount
+                if cur.rowcount == 0:
+                    # No row to overlay. Either the figure already agreed, or
+                    # this championship has no results of ours at all — which
+                    # is exactly the SMX playoffs before they start: the series
+                    # publishes where riders SIT going in, and we were fetching
+                    # that table, matching all 112 riders against it, and
+                    # throwing it away. wins/podiums stay 0 because we have no
+                    # races for them, which is the truth, not a placeholder.
+                    cur.execute(
+                        """
+                        INSERT INTO standings
+                               (season_id, class, rider_id, points, position)
+                        SELECT se.id, %s, %s, %s, %s
+                        FROM seasons se JOIN series s ON s.id = se.series_id
+                        WHERE s.abbrev = %s AND se.year = %s
+                        ON CONFLICT (season_id, class, rider_id) DO NOTHING
+                        """,
+                        (cls, rider_id, r["points"], r["position"],
+                         abbrev, datetime.date.today().year),
+                    )
+                    inserted += cur.rowcount
         conn.commit()
         total += changed
         report[f"{abbrev} {cls}"] = {
             "rows": len(rows), "matched": matched,
-            "unmatched": unmatched, "updated": changed,
+            "unmatched": unmatched, "updated": changed, "inserted": inserted,
         }
 
     return {"anchor": anchor, "applied": total, "championships": report}
