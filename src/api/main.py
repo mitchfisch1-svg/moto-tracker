@@ -11,6 +11,7 @@ then open http://127.0.0.1:8000/docs
 import datetime
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -32,6 +33,7 @@ from ..apns import apns_ready, send_live_activity
 from ..names import display_surname, titlecase_name
 from ..config import get_database_url
 from ..notify import notify_work
+from .. import mockrace
 
 log = logging.getLogger("moto.api")
 
@@ -388,7 +390,7 @@ _LA_INTERVAL_S = 10
 # Live Activity updates even with NSSupportsLiveActivitiesFrequentUpdates set,
 # and a race day is six motos plus qualifying — the budget is spent across the
 # whole afternoon, not per session.
-_LA_MIN_GAP_S = 15
+_LA_MIN_GAP_S = 20
 
 
 def _la_change_key(state):
@@ -402,7 +404,26 @@ def _la_change_key(state):
 
     The clock still goes OUT in the payload. It just no longer counts as news.
     """
-    return {k: v for k, v in (state or {}).items() if k != "remaining"}
+    out = {k: v for k, v in (state or {}).items() if k != "remaining"}
+    # And not the third decimal of a gap either. "1.613" -> "1.647" is not news
+    # on a lock screen, but it differs on nearly every poll, so gaps alone kept
+    # the diff true almost as often as the clock did. Compare what a person
+    # would actually notice: the order, and the gap to a tenth. The full
+    # precision still goes out in the payload.
+    riders = out.get("riders")
+    if isinstance(riders, list):
+        out["riders"] = [
+            {**r, "g": _coarse_gap(r.get("g"))} if isinstance(r, dict) else r
+            for r in riders
+        ]
+    return out
+
+
+def _coarse_gap(g):
+    try:
+        return f"{float(g):.1f}"
+    except (TypeError, ValueError):
+        return g          # "Leader", "1 lap down", a best-lap time, or None
 # Off race day the loop just re-asks the (cached) race-window gate, so this
 # interval costs nothing but a wake-up from sleep.
 _LA_IDLE_INTERVAL_S = 300
@@ -517,7 +538,7 @@ def _live_activity_loop():
         # frame it last received, until a redeploy. That is indistinguishable
         # from the stale-card bug this loop exists to prevent.
         try:
-            window_open = _race_window_open()
+            window_open = bool(mockrace.status().get("running")) or                 _race_window_open()
         except Exception:
             log.exception("live-activity: race-window check failed")
             window_open = False
@@ -815,6 +836,7 @@ def health():
     except Exception:
         raise HTTPException(status_code=503, detail="database unavailable")
     return {"status": "ok", "db": True, "apns": apns_ready(),
+            "mock_race": mockrace.status(),
             "live_activity": _la_health()}
 
 
@@ -1728,6 +1750,22 @@ def _combined_qualifying(race_name, live_riders):
     }
 
 
+@app.post("/debug/mock-race")
+def mock_race(minutes: int = 12, key: str = "", stop: bool = False):
+    """Drive a synthetic race through the real live path. See src/mockrace.py.
+
+    Guarded by MXT_MOCK_KEY: unset, this 404s and the feature does not exist.
+    v1.5 is on the App Store, so a run is labelled plainly as a system test —
+    it exercises the machinery without telling anyone a race is happening.
+    """
+    want = os.environ.get("MXT_MOCK_KEY")
+    if not want or key != want:
+        raise HTTPException(status_code=404, detail="not found")
+    if stop:
+        return mockrace.stop()
+    return mockrace.start(minutes)
+
+
 @app.get("/live")
 def live(demo: bool = False):
     """Live-timing snapshot for the event happening now (if any).
@@ -1740,6 +1778,18 @@ def live(demo: bool = False):
     With demo=true and no live event, replays the most recent completed event's
     timing feed so the live screen can be tested/demoed on any day.
     """
+    # A mock run owns the live path entirely while it lasts: the app polls
+    # this, the Live Activity loop diffs it and pushes it to real phones. That
+    # is the point — the parts under test cannot tell it is synthetic.
+    mock = mockrace.timing()
+    if mock:
+        return {"live": True, "mock": True, "timing": mock,
+                "event": {"event_id": 0, "series": "SMX",
+                          "venue": mockrace.VENUE, "city": "Columbus",
+                          "state": "OH", "round_label": "System test",
+                          "event_date": None, "start_time_et": None,
+                          "broadcast": None, "track_map": None}}
+
     rows = query(
         """
         SELECT e.id AS event_id, s.abbrev AS series, e.round_number,
