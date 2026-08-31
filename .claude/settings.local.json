@@ -360,7 +360,9 @@
       "PowerShell(Get-ChildItem *)",
       "PowerShell(Select-String *)",
       "PowerShell(Measure-Object *)",
-      "PowerShell(..venvScriptspython.exe *)"
+      "PowerShell(..venvScriptspython.exe *)",
+      "Bash(git worktree *)",
+      "Bash(git fetch *)"
     ],
     "ask": [
       "Bash(rm -rf *)",
