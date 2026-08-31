@@ -548,11 +548,7 @@ def _live_activity_loop():
                             _LA_STATS["skipped"] = _LA_STATS.get("skipped", 0) + 1
                             time.sleep(_LA_INTERVAL_S)
                             continue
-                        last_state, last_push = key, time.time()
-                        _LA_STATS.update(
-                            last_push_at=last_push, race=state.get("race"),
-                            pushes=_LA_STATS.get("pushes", 0) + 1,
-                            cycle_ms=int((last_push - _cycle_started) * 1000))
+                        last_state = key
                         stale = []
                         # Once per event: remotely launch the activity on every
                         # phone that registered a push-to-start token (iOS 17.2+)
@@ -565,6 +561,7 @@ def _live_activity_loop():
                                 started = conn.execute(
                                     "SELECT 1 FROM push_sent WHERE key = %s",
                                     (start_key,)).fetchone() is not None
+                        sent = failed = 0
                         with httpx.Client(http2=True, timeout=15) as client:
                             for row in rows:
                                 if row["kind"] == "start" and not started:
@@ -576,6 +573,16 @@ def _live_activity_loop():
                                 ok, reason = send_live_activity(
                                     row["token"], "update", state, client=client,
                                     stale_after_s=_LA_STALE_S)
+                                # Record the OUTCOME, not just the attempt.
+                                # last_push_at was being stamped before any of
+                                # this ran, so a key Apple rejects every single
+                                # time would still read as a healthy loop —
+                                # "pushing fine" while nothing reaches a phone.
+                                if ok:
+                                    sent += 1
+                                else:
+                                    failed += 1
+                                    _LA_STATS["last_error"] = reason
                                 if reason in ("BadDeviceToken", "Unregistered",
                                               "ExpiredToken"):
                                     stale.append(row["token"])
@@ -589,6 +596,18 @@ def _live_activity_loop():
                                 conn.execute(
                                     "DELETE FROM live_activity_tokens "
                                     "WHERE token = ANY(%s)", (stale,))
+                        # Only a push that actually landed counts as the last
+                        # one. A failed round now retries on the next tick
+                        # instead of being suppressed until the order moves.
+                        now_s = time.time()
+                        _LA_STATS.update(
+                            race=state.get("race"),
+                            pushes=_LA_STATS.get("pushes", 0) + sent,
+                            failed=_LA_STATS.get("failed", 0) + failed,
+                            cycle_ms=int((now_s - _cycle_started) * 1000))
+                        if sent:
+                            last_push = now_s
+                            _LA_STATS["last_push_at"] = last_push
                     elif not payload.get("live"):
                         # Racing's over. End every activity and forget the tokens
                         # (fresh ones register next race day).
@@ -817,6 +836,10 @@ def _la_health() -> dict:
         # counting as news again and the throttle is coming.
         "pushes": _LA_STATS.get("pushes", 0),
         "skipped": _LA_STATS.get("skipped", 0),
+        # Non-zero here with pushes flat means Apple is refusing them, which
+        # looks identical on a lock screen to a loop that never ran.
+        "failed": _LA_STATS.get("failed", 0),
+        "last_error": _LA_STATS.get("last_error"),
     }
 
 
