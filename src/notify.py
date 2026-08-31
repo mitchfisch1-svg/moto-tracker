@@ -11,6 +11,7 @@ installs later never gets a burst of stale alerts for things that already
 happened.
 """
 
+import datetime
 import json
 import logging
 
@@ -101,12 +102,17 @@ def _last_name(full):
 
 
 # --- triggers ----------------------------------------------------------------
+# How long after the gate drops a podium is still news. A result that lands
+# inside this is the race unfolding; one that lands after it is a repair.
+_RESULT_ALERT_WINDOW = datetime.timedelta(hours=18)
+
+
 def _rider_results(cur):
     """A followed rider wins/podiums a points session (main or moto)."""
     cur.execute(
         """
         SELECT r.session_id, r.rider_id, r.position, ri.full_name,
-               sess.label, e.venue
+               sess.label, e.venue, e.start_time_utc
         FROM results r
         JOIN sessions sess ON sess.id = r.session_id
         JOIN events e ON e.id = sess.event_id
@@ -116,11 +122,21 @@ def _rider_results(cur):
           AND e.event_date >= (now() - interval '2 days')::date
         """
     )
-    for session_id, rider_id, pos, name, label, venue in cur.fetchall():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for session_id, rider_id, pos, name, label, venue, started in cur.fetchall():
         key = f"result:{session_id}:{rider_id}"
         if _seen(cur, key):
             continue
-        tokens = _tokens_following(cur, [rider_id], 'results')
+        # Ironman's results were re-ingested two days late, after a crash in
+        # the pipeline was fixed. That wrote NEW session rows, so every dedupe
+        # key looked unseen, and phones lit up on Sunday night with "Jorge
+        # Prado won 450 Moto 2" — a result everyone had known since Saturday.
+        #
+        # The window is on the RACE, not on the row: a podium is news while the
+        # race is happening and a repair afterwards. Old ones are still marked,
+        # so fixing an ingest can never queue up a burst for later either.
+        fresh = started is not None and (now - started) <= _RESULT_ALERT_WINDOW
+        tokens = _tokens_following(cur, [rider_id], 'results') if fresh else []
         if tokens:
             race = (label or "").replace("#", "").strip()
             verb = "won" if pos == 1 else f"finished P{pos} in"
