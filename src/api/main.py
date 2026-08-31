@@ -1367,7 +1367,13 @@ def _rider_status(r: dict) -> str:
 _FINAL_RACE_RE = {
     "MX":  re.compile(r"450.*moto\D*2\b", re.I),          # 450 Moto #2 closes MX
     "SX":  re.compile(r"450.*(?:main|race\D*3\b)", re.I),  # 450 Main (or Race #3, Triple Crown)
-    "SMX": re.compile(r"450.*main", re.I),
+    # SMX playoffs: we have never ingested one, and the series-points page
+    # names rounds rather than sessions, so whether a round closes on a Main or
+    # a second Moto is genuinely unknown. Match EITHER. This is a detector, not
+    # a claim — being permissive only means the day retires promptly under
+    # whichever format turns up, and getting it wrong the other way leaves the
+    # lock screen and the Next Race widget sitting on a finished round.
+    "SMX": re.compile(r"450.*(?:main|moto\D*2\b)", re.I),
 }
 # Keep the final running order up briefly after the checkered so the finish is
 # visible, then hand over to the official results.

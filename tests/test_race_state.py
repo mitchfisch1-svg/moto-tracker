@@ -359,3 +359,24 @@ def test_nothing_stays_nothing():
 def test_a_word_is_not_mistaken_for_a_lap_count():
     assert readable_gap("Leader") == "Leader"
     assert readable_gap("Lapped") == "Lapped"
+
+
+# --- SMX: a format we have never ingested ------------------------------------
+@pytest.mark.parametrize("race_name", [
+    "450 Main Event",          # if the playoffs close on a main, as SX does
+    "450 Moto #2",             # if they close on a second moto, as MX does
+    "450 MAIN",
+])
+def test_smx_day_retires_under_either_format(race_name):
+    """SMX round 1 is the first the app will ever see. If the closing race is
+    not recognised the day never retires, and the lock screen and Next Race
+    widget sit on a finished round — which is what happened at Ironman for a
+    different reason. Match either format rather than bet on one."""
+    assert _is_final_race_of_day(race_name, "SMX")
+
+
+@pytest.mark.parametrize("race_name", [
+    "250 Main Event", "250 Moto #2", "450 Heat #1", "450 Qualifying 2",
+])
+def test_smx_does_not_retire_on_an_earlier_race(race_name):
+    assert not _is_final_race_of_day(race_name, "SMX")
