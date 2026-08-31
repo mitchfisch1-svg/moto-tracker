@@ -384,6 +384,25 @@ _LA_STALE_S = 900
 _LA_RESULT_HOLD_S = 1800
 
 _LA_INTERVAL_S = 10
+# Never push more often than this, however fast the order churns. Apple budgets
+# Live Activity updates even with NSSupportsLiveActivitiesFrequentUpdates set,
+# and a race day is six motos plus qualifying — the budget is spent across the
+# whole afternoon, not per session.
+_LA_MIN_GAP_S = 15
+
+
+def _la_change_key(state):
+    """The parts of a pushed state that mean something changed.
+
+    Everything EXCEPT the countdown. `remaining` ticks every second, so a
+    straight `state != last_state` was true on every single pass — which
+    silently defeated the budget guard it was being compared for and pushed
+    every 10s for a whole moto, ~180 times. Apple throttles that, and the lock
+    screen freezes: exactly what it was written to prevent.
+
+    The clock still goes OUT in the payload. It just no longer counts as news.
+    """
+    return {k: v for k, v in (state or {}).items() if k != "remaining"}
 # Off race day the loop just re-asks the (cached) race-window gate, so this
 # interval costs nothing but a wake-up from sleep.
 _LA_IDLE_INTERVAL_S = 300
@@ -520,13 +539,19 @@ def _live_activity_loop():
                         # how the lock screen ended up frozen mid-session. Only
                         # spend budget when something actually changed (with a
                         # heartbeat so a quiet session can't look abandoned).
-                        changed = state != last_state
-                        if not changed and (time.time() - last_push) < 120:
+                        key = _la_change_key(state)
+                        changed = key != last_state
+                        since = time.time() - last_push
+                        # Something worth sending, but not yet — or nothing
+                        # worth sending and the heartbeat is not due.
+                        if (changed and since < _LA_MIN_GAP_S) or                            (not changed and since < 120):
+                            _LA_STATS["skipped"] = _LA_STATS.get("skipped", 0) + 1
                             time.sleep(_LA_INTERVAL_S)
                             continue
-                        last_state, last_push = state, time.time()
+                        last_state, last_push = key, time.time()
                         _LA_STATS.update(
                             last_push_at=last_push, race=state.get("race"),
+                            pushes=_LA_STATS.get("pushes", 0) + 1,
                             cycle_ms=int((last_push - _cycle_started) * 1000))
                         stale = []
                         # Once per event: remotely launch the activity on every
@@ -787,6 +812,11 @@ def _la_health() -> dict:
         "live_call_ms": _LA_STATS.get("live_ms"),
         "cycle_ms": _LA_STATS.get("cycle_ms"),
         "push_interval_s": _LA_INTERVAL_S,
+        # Pushes actually sent vs cycles that had nothing new worth spending
+        # Apple's budget on. If `pushes` climbs by six a minute, the clock is
+        # counting as news again and the throttle is coming.
+        "pushes": _LA_STATS.get("pushes", 0),
+        "skipped": _LA_STATS.get("skipped", 0),
     }
 
 
