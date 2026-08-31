@@ -909,6 +909,12 @@ def next_events(series: str | None = None, limit: int = Query(3, le=20)):
           -- the Next Race widget sat on "Unadilla - RACE DAY" all evening,
           -- because the round is still "today" for hours after the checkered.
           AND e.status <> 'final'
+          -- And belt-and-braces on the same lie: a gate that dropped hours ago
+          -- is not upcoming whatever the status column says. Ironman was still
+          -- 'live' at 6:07pm and came back as the NEXT race, with a countdown
+          -- clamped to "Gate drop any moment" five hours after the gate.
+          AND (e.start_time_utc IS NULL
+               OR e.start_time_utc > now() - interval '6 hours')
     """
     params = []
     if series:
@@ -1401,6 +1407,23 @@ def _clock_is_ticking(timing) -> bool:
         return False
 
 
+def _retire_round(event_id) -> None:
+    """Mark a round finished, durably.
+
+    day_complete lives in a per-process dict, so a restart forgets it — and
+    everything downstream (the Next Race widget, /schedule/next) keys off
+    status, not that flag. Writing it the moment the racing is demonstrably
+    over retires the round then, rather than hours later when the clock window
+    happens to close.
+    """
+    try:
+        with _pool.connection() as conn:
+            conn.execute("UPDATE events SET status = 'final' "
+                         "WHERE id = %s AND status <> 'final'", (event_id,))
+    except Exception:
+        pass   # cosmetic; the timed window still retires it later
+
+
 def _feed_is_stalled(timing, unchanged_for_s: float, state: str) -> bool:
     """Has this session stopped being real?
 
@@ -1777,6 +1800,19 @@ def live(demo: bool = False):
     # this the flag was computed and then ignored — which is how "250 Group B
     # Qualifying 1 - on the gate" sat there at 11:51 PM for an 8 AM session.
     if timing.get("stale_grid"):
+        # WHICH side of the racing the dead grid is on decides what it means.
+        # Before the gate it was published early and there is nothing on yet.
+        # After it, the feed has simply gone back to sitting on a grid once
+        # everyone packed up — the racing is OVER, and saying "next race" then
+        # put the round that had just finished back on the Race Day tab at
+        # 6:07pm, counting down to a gate that dropped five hours earlier.
+        started = ev.get("start_time_utc")
+        if started and datetime.datetime.now(datetime.timezone.utc) >= started:
+            _retire_round(ev["event_id"])
+            nxt = next_events(limit=1)
+            return {"live": False, "day_complete": True, "event": ev,
+                    "timing": timing,
+                    "next_event": nxt[0] if nxt else None}
         nxt = next_events(limit=1)
         return {"live": False, "event": None,
                 "next_event": nxt[0] if nxt else None}
@@ -1802,14 +1838,7 @@ def live(demo: bool = False):
             # widget, /schedule/next) keys off status, not this in-memory flag.
             # Writing 'final' here retires the round the moment racing ends
             # rather than hours later when the clock window happens to close.
-            try:
-                with _pool.connection() as conn:
-                    conn.execute(
-                        "UPDATE events SET status = 'final' "
-                        "WHERE id = %s AND status <> 'final'",
-                        (ev["event_id"],))
-            except Exception:
-                pass   # cosmetic; the timed window still retires it later
+            _retire_round(ev["event_id"])
             nxt = next_events(limit=1)
             # Carry the final race's running order out with the day-complete
             # flag. The lock screen's last frame should be the RESULT, not a
@@ -2508,6 +2537,15 @@ def _title_fight_line(leader, chaser, gap, rounds_left):
             f"{_first_name(chaser)}{left}.")
 
 
+_WIDGET_TTL = 60
+_WIDGET_CACHE: dict = {}   # "all" -> (expires_at, payload)
+
+
+def _widget_cache(payload):
+    _WIDGET_CACHE["all"] = (time.time() + _WIDGET_TTL, payload)
+    return payload
+
+
 @app.get("/widget/standings")
 def widget_standings():
     """What the home-screen standings widget should show right now.
@@ -2519,6 +2557,14 @@ def widget_standings():
     widget, so this lags the app by minutes; the lock-screen Live Activity is
     the real-time surface.)
     """
+    # Answer fast or not at all. This calls live(), which on race day scrapes
+    # the feed and the results site and can take tens of seconds — and a widget
+    # that does not get an answer quickly does not retry, it renders "Can't
+    # reach MXT" and sits there. A minute-old running order is worth far more
+    # than a fresh one that never arrives.
+    hit = _WIDGET_CACHE.get("all")
+    if hit and hit[0] > time.time():
+        return hit[1]
     try:
         lp = live()
     except Exception:
@@ -2543,24 +2589,26 @@ def widget_standings():
             elif state == "finished":
                 label += " · final"
             # Key is "class" (not "klass") — that's what the widget decodes.
-            return {"live": True, "next_gate_utc": None, "next_venue": None,
-                    "next_start_et": None,
-                    "series_long": ((lp.get("event") or {}).get("venue")
-                                    or "Race day"),
-                    "classes": [{"class": label, "top5": rows}]}
+            return _widget_cache({
+                "live": True, "next_gate_utc": None, "next_venue": None,
+                "next_start_et": None,
+                "series_long": ((lp.get("event") or {}).get("venue")
+                                or "Race day"),
+                "classes": [{"class": label, "top5": rows}]})
     rd = rundown()
     # When the next gates drop. iOS rations widget refreshes by the day, so the
     # widget spends them near the racing and coasts through a quiet week — but
     # only the server knows when that is.
     nxt = next_events(limit=1)
     gate = (nxt[0].get("start_time_utc") if nxt else None)
-    return {"live": False, "series_long": rd.get("series_long"),
-            "next_gate_utc": gate.isoformat() if gate else None,
-            "next_venue": (nxt[0].get("venue") if nxt else None),
-            # The display string too: the widget should draw what it is given,
-            # not re-derive Eastern time on a device in another zone.
-            "next_start_et": (nxt[0].get("start_time_et") if nxt else None),
-            "classes": rd.get("classes")}
+    return _widget_cache({
+        "live": False, "series_long": rd.get("series_long"),
+        "next_gate_utc": gate.isoformat() if gate else None,
+        "next_venue": (nxt[0].get("venue") if nxt else None),
+        # The display string too: the widget should draw what it is given,
+        # not re-derive Eastern time on a device in another zone.
+        "next_start_et": (nxt[0].get("start_time_et") if nxt else None),
+        "classes": rd.get("classes")})
 
 
 @app.get("/rundown")
