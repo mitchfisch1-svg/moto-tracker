@@ -108,3 +108,55 @@ def test_the_closing_frame_does_not_mutate_what_it_was_given():
     _la_closing_frame(live)
     assert live["race"] == "250 Moto 1"
     assert live["remaining"] == 412
+
+
+# --- a staged grid has not raced yet -----------------------------------------
+# Spotted by Mitch on his own lock screen, 09-01, mid-mock: the card read
+# "450 Moto 1 · on the gate" and still listed "Leader" and a set of gaps. The
+# feed carries positions on the gate — gate picks, or the previous session's
+# order — and the card was rendering them as though a race had been run.
+from src.api.main import _la_content_state  # noqa: E402
+
+
+def _payload(state, gap="1.613"):
+    return {
+        "event": {"venue": "Historic Crew Stadium"},
+        "timing": {
+            "race_name": "450 Moto 1", "race_state": state,
+            "clock": {"remaining": None if state == "staged" else 900,
+                      "flag": "prestage" if state == "staged" else "green"},
+            "riders": [
+                {"position": 1, "name": "Chance Hymas", "number": "29", "gap": None},
+                {"position": 2, "name": "Julien Beaumer", "number": "13", "gap": gap},
+            ],
+        },
+    }
+
+
+def test_nobody_leads_a_race_that_has_not_started():
+    riders = _la_content_state(_payload("staged"))["riders"]
+    assert [r["g"] for r in riders] == ["", ""]
+
+
+def test_blank_not_zeroes_because_a_zero_is_a_time():
+    """"0.000" claims the rider set a time. Blank claims nothing."""
+    assert all(r["g"] == "" for r in _la_content_state(_payload("staged"))["riders"])
+
+
+def test_the_riders_are_still_listed_on_the_gate():
+    """Who is IN the race is real and worth showing; their gaps are not."""
+    riders = _la_content_state(_payload("staged"))["riders"]
+    assert [r["n"] for r in riders] == ["Hymas", "Beaumer"]
+    assert [r["p"] for r in riders] == [1, 2]
+
+
+def test_the_gaps_come_back_once_the_flag_flies():
+    riders = _la_content_state(_payload("racing"))["riders"]
+    assert riders[0]["g"] == "Leader"
+    assert riders[1]["g"].strip() != ""
+
+
+def test_a_finished_race_still_shows_its_result():
+    """Only STAGED is blank. A result is exactly what people want after."""
+    riders = _la_content_state(_payload("finished"))["riders"]
+    assert riders[0]["g"] == "Leader"

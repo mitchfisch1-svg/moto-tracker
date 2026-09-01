@@ -473,10 +473,20 @@ def _la_content_state(payload):
     else:
         # A race is about the gap, and there the leader IS the reference — his
         # own elapsed time tells you nothing about the fight behind him.
+        #
+        # EXCEPT on the gate, where none of it has happened yet. A staged grid
+        # still carries positions — gate picks, or last session's order — and
+        # this used to render them as "Leader" and a set of gaps, describing a
+        # race nobody had started. Mitch spotted it on his own lock screen
+        # (09-01): "if they're on the gate they would have no times". Right.
+        # The column goes blank until the flag flies. Blank, not zeroes:
+        # "0.000" is a time, and claiming a time is the thing to avoid.
+        staged = state == "staged"
         riders = [
             {"p": r.get("position"), "n": display_surname(r.get("name")),
              "num": str(r.get("number") or ""),
-             "g": ("Leader" if r.get("position") == 1
+             "g": ("" if staged
+                   else "Leader" if r.get("position") == 1
                    else readable_gap(r.get("gap"))[:12])}
             for r in (t.get("riders") or [])[:5]
         ]
