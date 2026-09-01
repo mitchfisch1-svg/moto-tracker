@@ -1048,6 +1048,14 @@ def health():
     mock = dict(mockrace.status())
     mock["configured"] = bool(os.environ.get("MXT_MOCK_KEY"))
     return {"status": "ok", "db": True, "apns": apns_ready(),
+            # WHICH BUILD IS ANSWERING. Render sets RENDER_GIT_COMMIT on every
+            # deploy. Without this there is no way to tell from outside whether
+            # a push has actually landed — a deploy whose changes are not
+            # externally visible is indistinguishable from one that never
+            # happened, which cost real confusion on 09-01. Same family as
+            # `configured` and `seconds_since_cycle`: report the freshness of
+            # the thing, not just the thing.
+            "commit": (os.environ.get("RENDER_GIT_COMMIT") or "")[:7] or None,
             "mock_race": mock,
             "live_activity": _la_health()}
 
