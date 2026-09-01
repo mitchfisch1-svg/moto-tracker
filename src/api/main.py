@@ -525,6 +525,101 @@ def _la_final_state(payload):
             "riders": [], "flag": None, "remaining": None}
 
 
+# The end-of-day card: both championship classes, not just whichever one
+# happened to race last. The last session of a programme is one class, so a
+# card built from it silently drops the other — you waited all afternoon and
+# the lock screen remembers half the day.
+_LA_OVERALL_CLASSES = ("250", "450")
+_LA_OVERALL_PER_CLASS = 3       # 3 + 3 = 6 rows; the widget renders 6 (was 5)
+
+
+def _la_overall_rows(by_class, per_class=_LA_OVERALL_PER_CLASS):
+    """Top N of each championship class, as lock-screen rows.
+
+    `cls` is set on the FIRST row of each class and blank on the rest, so the
+    card reads as two labelled blocks rather than six rows with the same word
+    repeated. The server decides that, not the widget — same rule as the
+    qualifying board, where the client just renders the string it is handed.
+
+    Classes are always emitted in _LA_OVERALL_CLASSES order so the card looks
+    identical at every round. A class with no result is skipped rather than
+    padded: three rows and a truth beats six rows and a guess.
+    """
+    rows = []
+    for klass in _LA_OVERALL_CLASSES:
+        entries = (by_class or {}).get(klass) or []
+        for i, e in enumerate(entries[:per_class]):
+            pts = e.get("points")
+            rows.append({
+                "p": e.get("position") or i + 1,
+                "n": display_surname(e.get("name")),
+                "num": str(e.get("number") or ""),
+                # An overall board has no gap to show. Points are what the
+                # result MEANS, especially in a playoff round.
+                "g": str(pts) if pts not in (None, "") else "",
+                "cls": klass if i == 0 else "",
+            })
+    return rows
+
+
+def _la_overall_state(event, by_class):
+    """The card to leave up once the whole programme is done, or None.
+
+    None means "not enough to say" — the caller falls back to the last race's
+    order, which is what shipped before this existed. Better the old card than
+    a confident half-empty one.
+    """
+    rows = _la_overall_rows(by_class)
+    if not rows:
+        return None
+    return {
+        "race": "Final results",
+        "venue": ((event or {}).get("venue") or "")[:28],
+        "riders": rows,
+        "flag": None,
+        "remaining": None,
+    }
+
+
+def _la_day_results(event_id):
+    """Each championship class's decisive result, from the database.
+
+    SX and SMX settle on one `main` per class, so the main IS the day's result
+    and this is a straight read. MX is different — two motos and a scraped
+    round Overall — and is deliberately NOT handled here: it returns nothing
+    for a moto-only round and the caller falls back to the last race's order.
+    Guessing an MX overall by summing moto points is exactly the kind of
+    recomputation that mis-scored every championship this season; when MX comes
+    back in May, feed this the settled Overall blocks instead (see
+    `_overall_is_settled`), do not compute it here.
+
+    Reads the database rather than the live feed on purpose: the results
+    ingest runs every 3 minutes while an event is live, so by day-complete the
+    rows are already there, and they survive a process restart.
+    """
+    try:
+        rows = query(
+            """
+            SELECT ss.class AS klass, r.position, r.points,
+                   ri.full_name AS name, ri.number
+            FROM sessions ss
+            JOIN results r  ON r.session_id = ss.id
+            JOIN riders  ri ON ri.id = r.rider_id
+            WHERE ss.event_id = %s AND ss.type = 'main'
+              AND r.position IS NOT NULL
+            ORDER BY ss.class, r.position
+            """,
+            (event_id,),
+        )
+    except Exception:
+        log.exception("live-activity: could not read day results")
+        return {}
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["klass"], []).append(dict(r))
+    return out
+
+
 _LA_SESSION_DONE = {"race": "Session complete", "venue": None,
                     "riders": [], "flag": None, "remaining": None}
 
@@ -746,7 +841,17 @@ def _live_activity_loop():
                         # going not-live (window closed, feed gone) clears at once.
                         done = payload.get("day_complete")
                         if done:
-                            final, hold = _la_final_state(payload), _LA_RESULT_HOLD_S
+                            # The whole programme is over, so leave BOTH
+                            # classes up rather than whichever raced last.
+                            # Falls back to the last race's order when the day
+                            # doesn't settle on mains (an MX round), which is
+                            # what shipped before this existed.
+                            ev = payload.get("event") or {}
+                            overall = (_la_overall_state(
+                                ev, _la_day_results(ev.get("event_id")))
+                                if ev.get("event_id") else None)
+                            final = overall or _la_final_state(payload)
+                            hold = _LA_RESULT_HOLD_S
                         else:
                             # Not the end of the DAY, but we are still going
                             # not-live — the feed dropped out, or the window is
