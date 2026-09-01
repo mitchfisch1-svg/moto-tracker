@@ -32,8 +32,21 @@ _lock = threading.Lock()
 _run: dict | None = None
 
 MAX_MINUTES = 45          # a moto is 30 + 2 laps; never leave one running longer
+MAX_SESSIONS = 4          # a real day is more, but a test nobody watches is waste
 VENUE = "MXT System Test"
 RACE = "Mock Moto (system test)"
+
+GATE_S = 120              # on the gate before green — the transition Ironman missed
+FINISH_S = 60             # the finishing order stays up before the next session
+
+# A race day is not one session, it is a SEQUENCE of them, and the handoff
+# between two is a thing the lock screen has to survive: one race ends, its
+# result sits for a moment, then a different race name appears back on the
+# gate. Nothing had ever tested that — the first mock ran a single moto, which
+# exercises everything except the seam. These names make the seam visible: the
+# race name is inside the Live Activity's change key, so a session change is
+# unmissable both on the card and in the diff.
+_SESSIONS = ["250 Moto 1", "450 Moto 1", "250 Moto 2", "450 Moto 2"]
 
 # Real names make the diff realistic — same string lengths, same surname
 # rendering, same widget truncation behaviour as a genuine board.
@@ -45,14 +58,24 @@ _FIELD = [
 ]
 
 
-def start(minutes: int, seed: int = 7) -> dict:
-    """Begin a run. Returns its status."""
+def start(minutes: int, seed: int = 7, sessions: int = 1) -> dict:
+    """Begin a run of `sessions` back-to-back sessions. Returns its status.
+
+    Each session is `minutes` long (two of them on the gate, the rest racing)
+    and is followed by FINISH_S showing its finishing order, which is what a
+    real programme does between motos. With sessions=1 this is the original
+    single-moto behaviour plus a proper finish, instead of the feed simply
+    vanishing mid-race.
+    """
     global _run
     minutes = max(1, min(int(minutes), MAX_MINUTES))
+    sessions = max(1, min(int(sessions), MAX_SESSIONS))
     with _lock:
         _run = {
             "started_at": time.time(),
-            "duration_s": minutes * 60,
+            "session_s": minutes * 60,
+            "sessions": sessions,
+            "duration_s": sessions * (minutes * 60 + FINISH_S),
             "seed": int(seed),
         }
         return _status_locked()
@@ -70,6 +93,26 @@ def status() -> dict:
         return _status_locked()
 
 
+def _phase(elapsed: float, run: dict):
+    """Where in the programme we are: (session index, offset in it, state).
+
+    One session is `session_s` of gate-then-racing followed by FINISH_S of
+    finishing order. Everything past the last one is over.
+    """
+    block = run["session_s"] + FINISH_S
+    idx = min(int(elapsed // block), run["sessions"] - 1)
+    within = elapsed - idx * block
+    if within < GATE_S:
+        return idx, within, "staged"
+    if within < run["session_s"]:
+        return idx, within, "racing"
+    return idx, within, "finished"
+
+
+def _session_name(idx: int) -> str:
+    return f"{_SESSIONS[idx % len(_SESSIONS)]} (system test)"
+
+
 def _status_locked() -> dict:
     if not _run:
         return {"running": False}
@@ -77,8 +120,11 @@ def _status_locked() -> dict:
     left = _run["duration_s"] - elapsed
     if left <= 0:
         return {"running": False, "expired": True}
+    idx, _, state = _phase(elapsed, _run)
     return {"running": True, "elapsed_s": round(elapsed),
-            "remaining_s": round(left), "venue": VENUE, "race": RACE}
+            "remaining_s": round(left), "venue": VENUE,
+            "race": _session_name(idx), "state": state,
+            "session": idx + 1, "sessions": _run["sessions"]}
 
 
 def _order(elapsed: float, seed: int):
@@ -128,18 +174,32 @@ def timing():
         elapsed = time.time() - _run["started_at"]
         if elapsed >= _run["duration_s"]:
             return None
-        seed, total = _run["seed"], _run["duration_s"]
+        run = dict(_run)
 
-    remaining = max(0, int(total - elapsed))
-    # Two minutes on the gate, then green — so the staged -> racing transition
-    # the lock screen missed at Ironman happens on every single run.
-    staged = elapsed < 120
+    idx, within, state = _phase(elapsed, run)
+    # Each session gets its own seed, so the running order genuinely differs
+    # from the last one. A second moto that replayed the first would test the
+    # transition but not that the card actually re-renders new content.
+    seed = run["seed"] + idx * 101
+    racing_s = run["session_s"] - GATE_S
+    if state == "staged":
+        # Two minutes on the gate, then green — so the staged -> racing
+        # transition the lock screen missed at Ironman happens every session,
+        # not just once a run.
+        remaining, flag, order_t = None, "prestage", 0.0
+    elif state == "racing":
+        remaining, flag = max(0, int(run["session_s"] - within)), "green"
+        order_t = within - GATE_S
+    else:
+        # Finished: the order freezes and the clock reads zero. This is what
+        # `_la_content_state` turns into "· final", and what the app shows
+        # between motos. Never exercised before multi-session runs existed.
+        remaining, flag, order_t = 0, "checkered", racing_s
     return {
-        "race_name": RACE,
-        "race_state": "staged" if staged else "racing",
-        "riders": _order(max(0.0, elapsed - 120), seed),
-        "clock": {"remaining": None if staged else remaining,
-                  "flag": "prestage" if staged else "green"},
+        "race_name": _session_name(idx),
+        "race_state": state,
+        "riders": _order(order_t, seed),
+        "clock": {"remaining": remaining, "flag": flag},
         "announcements": [],
         "mock": True,
     }

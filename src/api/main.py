@@ -377,13 +377,15 @@ def _notify_loop():
 # one sat on a lock screen reading "450 Moto #2 · on the gate" hours after the
 # program finished. Better a visibly stale card than a confidently wrong one.
 _LA_STALE_S = 900
-# ...and once the day is done, how long the final result stays up before iOS
-# clears it on its own.
-# How long the finishing order stays on the lock screen once the day is done.
-# Half an hour: long enough to read the result you waited all afternoon for,
-# short enough that it is gone before it becomes something you have to swipe
-# away. Nobody should have to tidy up after a race.
-_LA_RESULT_HOLD_S = 1800
+# ...and once the day is done, how long the finishing order stays on the lock
+# screen before iOS clears it on its own.
+# AN HOUR (Mitch, 08-31): the result is the thing people waited all afternoon
+# for, and half an hour was gone before anyone who missed the finish came back
+# to it. iOS clears it without us, so nobody has to tidy up after a race.
+# (This constant used to read 1800 while the comment beside the code that uses
+# it said "an hour" — two comments in one file disagreeing about the same
+# number. Believe the constant, and keep the two in step.)
+_LA_RESULT_HOLD_S = 3600
 
 _LA_INTERVAL_S = 10
 # Never push more often than this, however fast the order churns. Apple budgets
@@ -523,11 +525,93 @@ def _la_final_state(payload):
             "riders": [], "flag": None, "remaining": None}
 
 
+_LA_SESSION_DONE = {"race": "Session complete", "venue": None,
+                    "riders": [], "flag": None, "remaining": None}
+
+
+def _la_end_activities(final, hold) -> int:
+    """End every 'update' activity and forget its token. Returns how many.
+
+    Split out of the loop because it now has TWO callers. The original one is
+    the feed going not-live while the race window is still open — the normal
+    end of a race day. The second is the window itself CLOSING, which used to
+    end nothing at all.
+
+    That second path is the orphaned-card bug (08-31). `window_open` is checked
+    before the payload, so once the window shut the loop slept and never reached
+    the end branch below. The card just stayed on the lock screen. The app has
+    its own `LiveActivity.end()`, but it lives in the Race Day tab's component
+    and the app opens on Standings — so on a locked phone NOTHING cleared it.
+    Verified the hard way: a finished mock sat on Mitch's lock screen reading
+    "0:09, Beaumer P1" until he swiped it away by hand.
+    """
+    import httpx
+    try:
+        rows = query(
+            "SELECT token FROM live_activity_tokens WHERE kind = 'update'")
+    except Exception:
+        log.exception("live-activity: could not read tokens to end")
+        return 0
+    upd = [r["token"] for r in rows]
+    if not upd:
+        return 0
+    with httpx.Client(http2=True, timeout=15) as client:
+        for t in upd:
+            send_live_activity(t, "end", final, client=client,
+                               dismiss_after_s=hold)
+    with _pool.connection() as conn:
+        conn.execute("DELETE FROM live_activity_tokens "
+                     "WHERE token = ANY(%s)", (upd,))
+    return len(upd)
+
+
+def _la_should_end_now(was_open, window_open, window_known) -> bool:
+    """Whether this pass should tear the activities down.
+
+    ONLY on a confirmed open -> closed transition. The window check is wrapped
+    in a bare `except` that falls back to False, so without the `window_known`
+    guard a transient database blip mid-race would read as "the window closed"
+    and end every card on every phone in the middle of a moto. That is a far
+    worse failure than the stale card the teardown exists to prevent: a stale
+    card recovers on the next push, an ended one is gone for good.
+
+    Not knowing is not the same as knowing it is shut.
+    """
+    return bool(was_open and window_known and not window_open)
+
+
+def _la_closing_frame(last_pushed):
+    """The card to leave behind, built from the last thing we actually sent.
+
+    When the window closes we have no fresh payload to build a result from —
+    but we still hold the last state that went out, and that IS the finishing
+    order. Leaving it up labelled "· final" beats blanking it: the result is
+    what people waited all afternoon for. Falls back to a plain done-card if we
+    never pushed anything (nothing to show, so show nothing and dismiss).
+    """
+    if not last_pushed:
+        return _LA_SESSION_DONE, 0
+    final = dict(last_pushed)
+    raw = (final.get("race") or "Racing").split(" · ")[0][:32]
+    final["race"] = f"{raw} · final"
+    final["remaining"] = None
+    return final, _LA_RESULT_HOLD_S
+
+
 def _live_activity_loop():
     import httpx
     last_state = None
+    last_pushed = None      # the last content state actually sent, for the
+                            # closing frame when the window shuts
     last_push = 0.0
+    was_open = False
     while True:
+        # Stamped every pass, before anything that can fail or sleep. Without
+        # it `/health` could not tell a running loop from a dead one: `tokens`,
+        # `cycle_ms` and `live_call_ms` are written once per cycle and never
+        # cleared, so a five-hour-old fossil read exactly like a healthy loop.
+        # If this thread dies, THIS is the field that says so.
+        _LA_STATS["last_cycle_at"] = time.time()
         # There is nothing to put on a lock screen when no race is running, so
         # don't touch the database at all. This loop ticked every 10s around the
         # clock — ~8,600 queries a day — which on its own was enough to keep the
@@ -539,12 +623,33 @@ def _live_activity_loop():
         # from the stale-card bug this loop exists to prevent.
         try:
             window_open = bool(mockrace.status().get("running")) or                 _race_window_open()
+            window_known = True
         except Exception:
             log.exception("live-activity: race-window check failed")
-            window_open = False
+            window_open = window_known = False
         if not window_open:
+            # The window closing is an EVENT, and it used to be silent. If we
+            # were open a moment ago there may be live cards out there with no
+            # other way to be cleared — the app only ends them from a tab the
+            # user has to navigate to. Spend one pass ending them properly,
+            # leaving the finishing order up for an hour, THEN go to sleep.
+            # `was_open` is deliberately NOT cleared when the check merely
+            # failed — so once it recovers and genuinely reports closed, the
+            # teardown still happens instead of having been swallowed.
+            if _la_should_end_now(was_open, window_open, window_known):
+                was_open = False
+                final, hold = _la_closing_frame(last_pushed)
+                last_state = last_pushed = None
+                try:
+                    ended = _la_end_activities(final, hold)
+                    if ended:
+                        log.info("live-activity: window closed, ended %d "
+                                 "activities", ended)
+                except Exception:
+                    log.exception("live-activity: end-on-window-close failed")
             time.sleep(_LA_IDLE_INTERVAL_S)
             continue
+        was_open = True
         try:
             if apns_ready():
                 rows = query("SELECT token, kind FROM live_activity_tokens")
@@ -628,6 +733,7 @@ def _live_activity_loop():
                             cycle_ms=int((now_s - _cycle_started) * 1000))
                         if sent:
                             last_push = now_s
+                            last_pushed = state
                             _LA_STATS["last_push_at"] = last_push
                     elif not payload.get("live"):
                         # Racing's over. End every activity and forget the tokens
@@ -639,22 +745,17 @@ def _live_activity_loop():
                         # nothing depends on us pushing again. Any other reason for
                         # going not-live (window closed, feed gone) clears at once.
                         done = payload.get("day_complete")
-                        final = _la_final_state(payload) if done else {
-                            "race": "Session complete", "venue": None,
-                            "riders": [], "flag": None, "remaining": None,
-                        }
-                        hold = _LA_RESULT_HOLD_S if done else 0
-                        upd = [r["token"] for r in rows if r["kind"] == "update"]
-                        if upd:
-                            with httpx.Client(http2=True, timeout=15) as client:
-                                for t in upd:
-                                    send_live_activity(
-                                        t, "end", final, client=client,
-                                        dismiss_after_s=hold)
-                            with _pool.connection() as conn:
-                                conn.execute(
-                                    "DELETE FROM live_activity_tokens "
-                                    "WHERE token = ANY(%s)", (upd,))
+                        if done:
+                            final, hold = _la_final_state(payload), _LA_RESULT_HOLD_S
+                        else:
+                            # Not the end of the DAY, but we are still going
+                            # not-live — the feed dropped out, or the window is
+                            # about to shut. Leave the last order up rather than
+                            # blanking it; a result beats an empty card, and it
+                            # matches what the window-close path now does.
+                            final, hold = _la_closing_frame(last_pushed)
+                        last_state = last_pushed = None
+                        _la_end_activities(final, hold)
         except Exception:
             log.exception("live-activity: push cycle failed")   # next tick retries
         time.sleep(_LA_INTERVAL_S)
@@ -835,8 +936,14 @@ def health():
         query("SELECT 1")
     except Exception:
         raise HTTPException(status_code=503, detail="database unavailable")
+    # `configured` reports whether MXT_MOCK_KEY is SET — never its value. A
+    # wrong key and an unset one both 404 from the endpoint, which is
+    # indistinguishable from outside and cost half an hour of guessing on
+    # 08-31. One boolean answers "is the feature even switched on".
+    mock = dict(mockrace.status())
+    mock["configured"] = bool(os.environ.get("MXT_MOCK_KEY"))
     return {"status": "ok", "db": True, "apns": apns_ready(),
-            "mock_race": mockrace.status(),
+            "mock_race": mock,
             "live_activity": _la_health()}
 
 
@@ -844,7 +951,17 @@ def _la_health() -> dict:
     """Enough to diagnose a stale lock screen WHILE it is stale."""
     now = time.time()
     last = _LA_STATS.get("last_push_at")
+    cyc = _LA_STATS.get("last_cycle_at")
     return {
+        # IS THE LOOP EVEN ALIVE? Read this before anything else here.
+        # Every other field is written once per cycle and never cleared, so
+        # they all survive the loop sleeping — or dying. A `tokens: 36,
+        # cycle_ms: 87` that was five hours stale read exactly like a healthy
+        # loop (08-31). Expect <= _LA_IDLE_INTERVAL_S off race day and
+        # <= ~_LA_INTERVAL_S during one. Much larger, or None once the process
+        # has been up a while, means the thread is gone and every lock screen
+        # is frozen on its last frame.
+        "seconds_since_cycle": round(now - cyc, 1) if cyc else None,
         "tokens": _LA_STATS.get("tokens"),
         "last_push_race": _LA_STATS.get("race"),
         "seconds_since_push": round(now - last, 1) if last else None,
@@ -1751,7 +1868,8 @@ def _combined_qualifying(race_name, live_riders):
 
 
 @app.post("/debug/mock-race")
-def mock_race(minutes: int = 12, key: str = "", stop: bool = False):
+def mock_race(minutes: int = 12, key: str = "", stop: bool = False,
+              sessions: int = 1):
     """Drive a synthetic race through the real live path. See src/mockrace.py.
 
     Guarded by MXT_MOCK_KEY: unset, this 404s and the feature does not exist.
@@ -1763,7 +1881,11 @@ def mock_race(minutes: int = 12, key: str = "", stop: bool = False):
         raise HTTPException(status_code=404, detail="not found")
     if stop:
         return mockrace.stop()
-    return mockrace.start(minutes)
+    # sessions>1 runs a PROGRAMME: moto, finish, next moto on the gate. The
+    # seam between two sessions is the one thing a single-moto run cannot test,
+    # and it is where the card has to pick up a new race name from a standing
+    # start. See src/mockrace.py.
+    return mockrace.start(minutes, sessions=sessions)
 
 
 @app.get("/live")
