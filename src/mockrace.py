@@ -32,6 +32,7 @@ _lock = threading.Lock()
 _run: dict | None = None
 
 MAX_MINUTES = 45          # a moto is 30 + 2 laps; never leave one running longer
+MIN_MINUTES = 3           # shorter than this and the gate phase eats the session
 MAX_SESSIONS = 4          # a real day is more, but a test nobody watches is waste
 VENUE = "MXT System Test"
 RACE = "Mock Moto (system test)"
@@ -81,7 +82,12 @@ def start(minutes: int, seed: int = 7, sessions: int = 1) -> dict:
     vanishing mid-race.
     """
     global _run
-    minutes = max(1, min(int(minutes), MAX_MINUTES))
+    # A session shorter than the gate phase never goes green: `staged` swallows
+    # the whole thing and it skips straight to `finished`, silently. Found by
+    # running one (09-02). Three minutes is the shortest session that actually
+    # races, so that is the floor — a run that cannot reach a green flag is not
+    # a test of anything this file exists to test.
+    minutes = max(MIN_MINUTES, min(int(minutes), MAX_MINUTES))
     sessions = max(1, min(int(sessions), MAX_SESSIONS))
     with _lock:
         racing = sessions * (minutes * 60 + FINISH_S)

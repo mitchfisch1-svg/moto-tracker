@@ -188,3 +188,22 @@ def test_the_day_complete_window_expires_with_the_run(monkeypatch):
     clock.t = 1_000_000.0 + end + 5
     assert mockrace.day_complete() is None
     assert mockrace.status()["running"] is False
+
+
+def test_a_session_too_short_to_race_is_lengthened(monkeypatch):
+    """GATE_S is 120s. A 2-minute session is all gate: `staged` swallows it and
+    it skips to `finished` without ever going green — silently, which is the
+    worst way to waste a run. Found by launching one (09-02)."""
+    clock = _Clock()
+    monkeypatch.setattr(mockrace.time, "time", clock)
+    mockrace.start(1, sessions=1)
+    # Whatever was asked for, the session must be able to reach a green flag.
+    saw_racing = False
+    for off in range(0, mockrace.MIN_MINUTES * 60, 10):
+        clock.t = 1_000_000.0 + off
+        t = mockrace.timing()
+        if t and t["race_state"] == "racing":
+            saw_racing = True
+            break
+    assert saw_racing, "a run was accepted that can never go green"
+    mockrace.stop()
