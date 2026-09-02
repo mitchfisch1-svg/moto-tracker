@@ -796,9 +796,40 @@ def _live_activity_loop():
                         with httpx.Client(http2=True, timeout=15) as client:
                             for row in rows:
                                 if row["kind"] == "start" and not started:
-                                    send_live_activity(
+                                    # Read the OUTCOME. This return value used
+                                    # to be discarded, with two consequences,
+                                    # both found on 09-02 by asking why 35
+                                    # start tokens existed for 4 installs:
+                                    #
+                                    # 1. A dead start token was never detected,
+                                    #    so it was never deleted. They pile up
+                                    #    forever — the same few phones
+                                    #    re-registering over weeks.
+                                    # 2. Push-to-start failure was INVISIBLE.
+                                    #    Nothing counted it, nothing logged it.
+                                    #    That is the one path no mock can
+                                    #    exercise, so race day is the first
+                                    #    time it ever runs — and it could fail
+                                    #    for every phone while /health showed a
+                                    #    clean board.
+                                    #
+                                    # Same lesson as b541256, one layer out:
+                                    # count what LANDED, not what was attempted.
+                                    # Kept in its own counters so it cannot
+                                    # distort the per-minute push rate, which
+                                    # is read against a floor of ~3.
+                                    ok, reason = send_live_activity(
                                         row["token"], "start", state, client=client,
                                         stale_after_s=_LA_STALE_S)
+                                    _LA_STATS["starts"] = (
+                                        _LA_STATS.get("starts", 0) + (1 if ok else 0))
+                                    if not ok:
+                                        _LA_STATS["starts_failed"] = (
+                                            _LA_STATS.get("starts_failed", 0) + 1)
+                                        _LA_STATS["last_start_error"] = reason
+                                    if reason in ("BadDeviceToken", "Unregistered",
+                                                  "ExpiredToken"):
+                                        stale.append(row["token"])
                                 if row["kind"] != "update":
                                     continue
                                 ok, reason = send_live_activity(
@@ -1102,6 +1133,16 @@ def _la_health() -> dict:
         # looks identical on a lock screen to a loop that never ran.
         "failed": _LA_STATS.get("failed", 0),
         "last_error": _LA_STATS.get("last_error"),
+        # PUSH-TO-START, reported separately. It fires once per event to launch
+        # a card on a phone whose app is closed, and until 09-02 its outcome
+        # was thrown away — so the path that has never been tested was also the
+        # path that could fail silently. Kept out of `pushes`/`failed` so it
+        # cannot distort the ~3/min rate those are read against.
+        # On race day: `starts` should equal the number of registered start
+        # tokens, once, near the beginning of the event.
+        "starts": _LA_STATS.get("starts", 0),
+        "starts_failed": _LA_STATS.get("starts_failed", 0),
+        "last_start_error": _LA_STATS.get("last_start_error"),
     }
 
 
