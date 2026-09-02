@@ -39,6 +39,19 @@ RACE = "Mock Moto (system test)"
 GATE_S = 120              # on the gate before green — the transition Ironman missed
 FINISH_S = 60             # the finishing order stays up before the next session
 
+# ...and then the day itself ends. This phase exists for one reason: the
+# end-of-day card — top three of BOTH classes, six rows, a class label — is
+# built only when `/live` reports `day_complete`, and nothing could produce
+# that. So the widget change shipped in 1.6.0 compiled, passed its checks, and
+# had never been DRAWN. A widget with a bad view draws nothing and says
+# nothing; the only instrument that catches it is a person looking at a lock
+# screen. This makes that possible without waiting for a real race day.
+DAY_DONE_S = 120
+
+# Points for a main-event finish, so the end-of-day card carries the number a
+# result actually means rather than a blank column.
+_POINTS = [25, 22, 20, 18, 16, 15, 14, 13, 12, 11]
+
 # A race day is not one session, it is a SEQUENCE of them, and the handoff
 # between two is a thing the lock screen has to survive: one race ends, its
 # result sits for a moment, then a different race name appears back on the
@@ -71,11 +84,18 @@ def start(minutes: int, seed: int = 7, sessions: int = 1) -> dict:
     minutes = max(1, min(int(minutes), MAX_MINUTES))
     sessions = max(1, min(int(sessions), MAX_SESSIONS))
     with _lock:
+        racing = sessions * (minutes * 60 + FINISH_S)
         _run = {
             "started_at": time.time(),
             "session_s": minutes * 60,
             "sessions": sessions,
-            "duration_s": sessions * (minutes * 60 + FINISH_S),
+            "racing_s": racing,
+            # The run stays "running" through the day-complete phase on
+            # purpose. The loop's window is open while the mock runs, and if it
+            # shut the moment the last session ended we would take the
+            # window-closed teardown path instead of the day-complete one —
+            # and never build the card this phase exists to show.
+            "duration_s": racing + DAY_DONE_S,
             "seed": int(seed),
         }
         return _status_locked()
@@ -100,6 +120,10 @@ def _phase(elapsed: float, run: dict):
     finishing order. Everything past the last one is over.
     """
     block = run["session_s"] + FINISH_S
+    if elapsed >= run["racing_s"]:
+        # Racing is over for the day. Still "running" so the loop's window
+        # stays open — see the note on duration_s in start().
+        return run["sessions"] - 1, elapsed - run["racing_s"], "day_done"
     idx = min(int(elapsed // block), run["sessions"] - 1)
     within = elapsed - idx * block
     if within < GATE_S:
@@ -177,6 +201,10 @@ def timing():
         run = dict(_run)
 
     idx, within, state = _phase(elapsed, run)
+    if state == "day_done":
+        # No session is on track. `/live` reports day_complete instead, which
+        # is what builds the end-of-day card. See day_complete().
+        return None
     # Each session gets its own seed, so the running order genuinely differs
     # from the last one. A second moto that replayed the first would test the
     # transition but not that the card actually re-renders new content.
@@ -203,3 +231,43 @@ def timing():
         "announcements": [],
         "mock": True,
     }
+
+
+def day_complete():
+    """The day's results per class, or None unless racing is over.
+
+    This is the block `/live` hands out once the programme finishes, and it is
+    the only way to make the loop build its end-of-day card without waiting for
+    a real race day. Shaped like `_la_day_results` returns: a dict of class ->
+    finishing rows, so the card builder cannot tell the difference.
+
+    A class's result is the LAST session it ran, which is what "the day's
+    result" means for a main-event format — the one SMX and SX use, and the one
+    Sep 12 uses. Deliberately not an invented moto aggregate: computing an
+    overall is the thing that mis-scored a season, and the real code refuses to
+    do it too.
+    """
+    with _lock:
+        if not _run:
+            return None
+        elapsed = time.time() - _run["started_at"]
+        if elapsed >= _run["duration_s"] or elapsed < _run["racing_s"]:
+            return None
+        run = dict(_run)
+
+    # Walk the sessions that actually ran, keeping the last one per class.
+    last_of_class: dict = {}
+    for idx in range(run["sessions"]):
+        name = _SESSIONS[idx % len(_SESSIONS)]
+        klass = name.split()[0]                  # "250 Moto 1" -> "250"
+        last_of_class[klass] = idx
+
+    out: dict = {}
+    for klass, idx in last_of_class.items():
+        order = _order(run["session_s"] - GATE_S, run["seed"] + idx * 101)
+        out[klass] = [
+            {"position": r["position"], "name": r["name"], "number": r["number"],
+             "points": _POINTS[i] if i < len(_POINTS) else 0}
+            for i, r in enumerate(order)
+        ]
+    return out

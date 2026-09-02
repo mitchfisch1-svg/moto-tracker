@@ -122,8 +122,69 @@ def test_a_run_cannot_be_left_going_forever(monkeypatch):
     clock = _Clock()
     monkeypatch.setattr(mockrace.time, "time", clock)
     run = mockrace.start(999, sessions=999)
+    # Includes the day-complete phase, which is deliberately part of a run:
+    # the window must stay open past the last session or the loop takes the
+    # window-closed teardown instead of building the end-of-day card.
     longest = mockrace.MAX_SESSIONS * (
-        mockrace.MAX_MINUTES * 60 + mockrace.FINISH_S)
+        mockrace.MAX_MINUTES * 60 + mockrace.FINISH_S) + mockrace.DAY_DONE_S
     assert run["remaining_s"] <= longest
     assert run["sessions"] == mockrace.MAX_SESSIONS
     mockrace.stop()
+
+
+# --- the day itself ending ---------------------------------------------------
+# The end-of-day card (top three of BOTH classes, six rows, a class label) is
+# built only when /live reports day_complete — and nothing could produce that.
+# So the widget change shipped in 1.6.0 compiled, passed its checks, and had
+# never been DRAWN on a screen. This phase is what makes looking at it possible
+# without waiting for a real race day.
+
+def test_racing_ends_but_the_run_keeps_the_window_open(monkeypatch):
+    """If `running` went false the loop would take the window-CLOSED teardown
+    path and never build the day-complete card at all."""
+    clock = _programme(monkeypatch, minutes=3, sessions=2)
+    racing = 2 * (180 + mockrace.FINISH_S)
+    clock.t = 1_000_000.0 + racing + 10
+    assert mockrace.timing() is None            # nothing on track
+    assert mockrace.status()["running"] is True  # ...but still running
+    assert mockrace.status()["state"] == "day_done"
+
+
+def test_the_day_complete_block_covers_every_class_that_raced(monkeypatch):
+    clock = _programme(monkeypatch, minutes=3, sessions=2)
+    clock.t = 1_000_000.0 + 2 * (180 + mockrace.FINISH_S) + 10
+    day = mockrace.day_complete()
+    assert sorted(day) == ["250", "450"]
+    assert all(len(rows) >= 3 for rows in day.values())
+
+
+def test_each_class_result_is_its_own_race_not_a_copy(monkeypatch):
+    clock = _programme(monkeypatch, minutes=3, sessions=2)
+    clock.t = 1_000_000.0 + 2 * (180 + mockrace.FINISH_S) + 10
+    day = mockrace.day_complete()
+    assert [r["name"] for r in day["250"][:3]] != [r["name"] for r in day["450"][:3]]
+
+
+def test_points_are_carried_so_the_card_has_something_to_show(monkeypatch):
+    clock = _programme(monkeypatch, minutes=3, sessions=2)
+    clock.t = 1_000_000.0 + 2 * (180 + mockrace.FINISH_S) + 10
+    day = mockrace.day_complete()
+    assert [r["points"] for r in day["450"][:3]] == [25, 22, 20]
+
+
+def test_there_is_no_day_complete_while_racing_is_still_on(monkeypatch):
+    """Reporting the day done mid-programme would blank a live card."""
+    clock = _programme(monkeypatch, minutes=3, sessions=2)
+    for off in (10, 150, 250, 400, 470):
+        clock.t = 1_000_000.0 + off
+        assert mockrace.day_complete() is None, f"day_complete leaked at t+{off}"
+
+
+def test_the_day_complete_window_expires_with_the_run(monkeypatch):
+    clock = _programme(monkeypatch, minutes=3, sessions=2)
+    end = 2 * (180 + mockrace.FINISH_S) + mockrace.DAY_DONE_S
+    clock.t = 1_000_000.0 + end - 5
+    assert mockrace.day_complete() is not None
+    clock.t = 1_000_000.0 + end + 5
+    assert mockrace.day_complete() is None
+    assert mockrace.status()["running"] is False

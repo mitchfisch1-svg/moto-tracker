@@ -888,9 +888,14 @@ def _live_activity_loop():
                             # doesn't settle on mains (an MX round), which is
                             # what shipped before this existed.
                             ev = payload.get("event") or {}
-                            overall = (_la_overall_state(
-                                ev, _la_day_results(ev.get("event_id")))
-                                if ev.get("event_id") else None)
+                            # A mock carries its results in the payload; a real
+                            # day has them in the database by now (the results
+                            # ingest runs every 3 min while an event is live).
+                            by_class = (payload.get("day_results")
+                                        or (_la_day_results(ev.get("event_id"))
+                                            if ev.get("event_id") else None))
+                            overall = (_la_overall_state(ev, by_class)
+                                       if by_class else None)
                             final = overall or _la_final_state(payload)
                             hold = _LA_RESULT_HOLD_S
                         else:
@@ -2067,14 +2072,25 @@ def live(demo: bool = False):
     # A mock run owns the live path entirely while it lasts: the app polls
     # this, the Live Activity loop diffs it and pushes it to real phones. That
     # is the point — the parts under test cannot tell it is synthetic.
+    _mock_event = {"event_id": 0, "series": "SMX",
+                   "venue": mockrace.VENUE, "city": "Columbus",
+                   "state": "OH", "round_label": "System test",
+                   "event_date": None, "start_time_et": None,
+                   "broadcast": None, "track_map": None}
     mock = mockrace.timing()
     if mock:
         return {"live": True, "mock": True, "timing": mock,
-                "event": {"event_id": 0, "series": "SMX",
-                          "venue": mockrace.VENUE, "city": "Columbus",
-                          "state": "OH", "round_label": "System test",
-                          "event_date": None, "start_time_et": None,
-                          "broadcast": None, "track_map": None}}
+                "event": _mock_event}
+    # Racing is over but the mock is still running: report the day as complete
+    # and carry the per-class results out with it. This is the ONLY way to make
+    # the loop build its end-of-day card without waiting for a real race day —
+    # and that card, six rows with a class label, had shipped without ever
+    # being drawn on a screen.
+    mock_day = mockrace.day_complete()
+    if mock_day is not None:
+        return {"live": False, "mock": True, "day_complete": True,
+                "day_results": mock_day, "timing": None,
+                "event": _mock_event, "next_event": None}
 
     rows = query(
         """
