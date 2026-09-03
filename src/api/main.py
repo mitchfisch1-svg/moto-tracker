@@ -1031,8 +1031,47 @@ def _stamp_broadcast(blocks, event_date):
     return blocks
 
 
+def _gate_drop_utc(blocks):
+    """When the racing actually starts, from the broadcast schedule.
+
+    The stored `start_time_utc` is when COVERAGE begins — for Sep 12 that is the
+    2:30 PM pre-race show, while the gate drops at 3:00. A countdown is asking
+    one question, "how long until the race", and half an hour of pre-race show
+    is not the race. Returns None when no block names the gate, and the caller
+    keeps the stored time.
+    """
+    for b in blocks or []:
+        if "gate" in (b.get("label") or "").lower() and b.get("start_utc"):
+            try:
+                return datetime.datetime.fromisoformat(b["start_utc"])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _decorate_event(row: dict) -> dict:
-    """Add start_time_et (display string) and parse the broadcast JSON."""
+    """Add start_time_et (display string) and parse the broadcast JSON.
+
+    Order matters: the broadcast blocks are stamped FIRST, because the gate
+    drop inside them is what the displayed time and the countdown should point
+    at. Only the payload changes — every window and race-day query reads the
+    `start_time_utc` COLUMN straight from SQL, so none of that shifts.
+    """
+    if "broadcast" in row:
+        try:
+            row["broadcast"] = json.loads(row["broadcast"]) if row["broadcast"] else None
+        except (TypeError, ValueError):
+            row["broadcast"] = None
+        row["broadcast"] = _stamp_broadcast(row["broadcast"], row.get("event_date"))
+
+    # Count down to the gate, not to the pre-race show. The blocks still carry
+    # every coverage time, so the Race Day tab can show both — the distinction
+    # is kept where there is room to explain it, and dropped where there is
+    # only one number.
+    gate = _gate_drop_utc(row.get("broadcast"))
+    if gate:
+        row["start_time_utc"] = gate
+
     utc = row.get("start_time_utc")
     if utc:
         et = utc.astimezone(_EASTERN)
@@ -1043,12 +1082,6 @@ def _decorate_event(row: dict) -> dict:
         )
     else:
         row["start_time_et"] = None
-    if "broadcast" in row:
-        try:
-            row["broadcast"] = json.loads(row["broadcast"]) if row["broadcast"] else None
-        except (TypeError, ValueError):
-            row["broadcast"] = None
-        row["broadcast"] = _stamp_broadcast(row["broadcast"], row.get("event_date"))
     return row
 
 
