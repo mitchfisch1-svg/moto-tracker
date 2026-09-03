@@ -98,6 +98,39 @@ def test_each_session_races_a_genuinely_different_order(monkeypatch):
     assert first != second
 
 
+def test_each_session_has_a_different_PODIUM(monkeypatch):
+    """The full order differing is not enough — the card only shows three rows.
+
+    This assertion is the one that was missing. Comparing whole 40-rider lists
+    passed happily while the top three were identical in every session, because
+    mid-pack riders shuffle and the leaders never did. The end-of-day card
+    renders exactly these rows, so this is the comparison that matters.
+    """
+    clock = _programme(monkeypatch, minutes=3, sessions=2)
+    first = [r["name"] for r in _at(clock, 150)["riders"]][:3]
+    second = [r["name"] for r in _at(clock, 370)["riders"]][:3]
+    assert first != second, (
+        f"both sessions podiumed {first} - the card's two class blocks are "
+        "being fed the same data, so it cannot prove it renders two classes")
+
+
+def test_the_day_complete_blocks_are_not_one_class_twice(monkeypatch):
+    """The failure this card was built to fix, asserted directly.
+
+    The original closing card was built from the LAST session's order, so a
+    programme's final class overwrote the day and it "remembered half the day"
+    (0a39fd9). Nothing checked that the two blocks actually differ.
+    """
+    clock = _programme(monkeypatch, minutes=3, sessions=2)
+    # Racing ends at 480 (2 x (180 + 60)); the day-complete phase runs to 600.
+    clock.t = 1_000_000.0 + 500
+    day = mockrace.day_complete()
+    assert day is not None and set(day) == {"250", "450"}
+    top = {k: [r["name"] for r in rows[:3]] for k, rows in day.items()}
+    assert top["250"] != top["450"], (
+        f"250 and 450 both podiumed {top['250']} - one class rendered twice")
+
+
 def test_the_programme_ends_and_stays_ended(monkeypatch):
     clock = _programme(monkeypatch, minutes=3, sessions=2)
     assert _at(clock, 479) is not None

@@ -181,12 +181,23 @@ def _order(elapsed: float, seed: int):
     race, so a result can be compared against a previous one.
     """
     rnd = random.Random(seed)
+    # The seed has to decide the HIERARCHY, not just the jitter. This used to
+    # read `pace = i + ...`, the rider's index in _FIELD — and since swing
+    # never exceeds 2.2, nobody could climb more than about two places. Every
+    # seed therefore produced the SAME podium: _FIELD[0..2]. The end-of-day
+    # card exists to show two different classes, so both its blocks were being
+    # fed one dataset twice, and a card that rendered the same block twice
+    # would have looked perfect in every mock ever run. Found 09-03 by reading
+    # the card off a lock screen: "250 Hymas, Beaumer, Davies / 450 Hymas,
+    # Beaumer, Davies" — a rider entering both classes.
+    base = list(range(len(_FIELD)))
+    rnd.shuffle(base)
     phases = [(rnd.uniform(0, 6.28), rnd.uniform(70, 240), rnd.uniform(0.4, 2.2))
               for _ in _FIELD]
     scored = []
     for i, (name, num) in enumerate(_FIELD):
         phase, period, swing = phases[i]
-        pace = i + swing * math.sin(phase + (elapsed / period) * 6.28)
+        pace = base[i] + swing * math.sin(phase + (elapsed / period) * 6.28)
         scored.append((pace, name, num))
     scored.sort()
     leader_pace = scored[0][0]
