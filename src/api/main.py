@@ -482,11 +482,18 @@ def _la_content_state(payload):
         # The column goes blank until the flag flies. Blank, not zeroes:
         # "0.000" is a time, and claiming a time is the thing to avoid.
         staged = state == "staged"
+        # And once the flag is out, P1 is not "Leader" — he WON. Leader is a
+        # present-tense word about a race still being run; leaving it on a
+        # finished board describes something that is no longer happening.
+        # Mitch, 09-02, watching a final card: "leader means while the race is
+        # going on". The gaps below stay as they are — those are the margins he
+        # won by, and they are still true.
+        first = "Winner" if state == "finished" else "Leader"
         riders = [
             {"p": r.get("position"), "n": display_surname(r.get("name")),
              "num": str(r.get("number") or ""),
              "g": ("" if staged
-                   else "Leader" if r.get("position") == 1
+                   else first if r.get("position") == 1
                    else readable_gap(r.get("gap"))[:12])}
             for r in (t.get("riders") or [])[:5]
         ]
@@ -700,6 +707,14 @@ def _la_closing_frame(last_pushed):
     raw = (final.get("race") or "Racing").split(" · ")[0][:32]
     final["race"] = f"{raw} · final"
     final["remaining"] = None
+    # This frame is built from a state captured mid-race, so P1 still reads
+    # "Leader". The card is about to say "final" — relabel him to match, or it
+    # contradicts itself in two places at once. Copied rather than mutated:
+    # `last_pushed` is the loop's own record of what it sent.
+    final["riders"] = [
+        {**r, "g": "Winner"} if isinstance(r, dict) and r.get("g") == "Leader" else r
+        for r in (final.get("riders") or [])
+    ]
     return final, _LA_RESULT_HOLD_S
 
 

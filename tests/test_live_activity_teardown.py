@@ -157,6 +157,41 @@ def test_the_gaps_come_back_once_the_flag_flies():
 
 
 def test_a_finished_race_still_shows_its_result():
-    """Only STAGED is blank. A result is exactly what people want after."""
+    """Only STAGED is blank. A result is exactly what people want after.
+
+    (P1's word changes to "Winner" once the flag is out — see below. What this
+    test pins is that the column is not blanked, which is what staged does.)
+    """
     riders = _la_content_state(_payload("finished"))["riders"]
-    assert riders[0]["g"] == "Leader"
+    assert riders[0]["g"] != ""
+
+
+# --- "Leader" is a present-tense word --------------------------------------
+# Mitch, 09-02, looking at a finished card: "leader means while the race is
+# going on". Once the flag is out that rider won; saying he leads describes
+# something that is no longer happening. Same species as the blank gate column.
+
+def test_the_winner_is_not_still_leading():
+    riders = _la_content_state(_payload("finished"))["riders"]
+    assert riders[0]["g"] == "Winner"
+
+
+def test_he_is_the_leader_while_it_is_still_being_raced():
+    assert _la_content_state(_payload("racing"))["riders"][0]["g"] == "Leader"
+
+
+def test_the_margins_he_won_by_are_still_true():
+    """Only P1's word changes. The gaps behind are facts either way."""
+    riders = _la_content_state(_payload("finished", gap="1.613"))["riders"]
+    assert riders[1]["g"].strip() != ""
+    assert riders[1]["g"] != "Winner"
+
+
+def test_a_closing_frame_does_not_say_final_and_leader_at_once():
+    """The frame is captured mid-race, so P1 arrives reading "Leader" — and the
+    card it becomes says "final". Both on one card contradict each other."""
+    live = _state()                     # race="250 Moto 1", P1 g="Leader"
+    final, _ = _la_closing_frame(live)
+    assert final["race"].endswith("· final")
+    assert final["riders"][0]["g"] == "Winner"
+    assert live["riders"][0]["g"] == "Leader", "must not mutate the loop's record"
