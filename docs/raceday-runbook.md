@@ -53,14 +53,38 @@ python scripts/audit.py
 ## 2 · Once the site switches to Columbus
 
 The results site serves last week's event until this one goes on track. When it
-flips, two things become possible.
+flips, three things become possible. **Run this every half hour from mid-morning
+— it tells you whether the switch has happened, and does the work when it has:**
+
+```bash
+python scripts/adopt_round.py
+```
+
+It is a **dry run by default** and prints what it would do. When it reports the
+site is still serving Ironman, that is the normal pre-race state and there is
+nothing to do — check back later. When it names Columbus:
+
+```bash
+python scripts/adopt_round.py --write
+```
+
+- [ ] It reports **ALL CLEAR** and writes `source_url` + `lrm_id` onto Playoff 1
+- [ ] Any `WARN` about the S3 feed not answering is fine before cars are on track — re-run once qualifying starts
+
+**Why this is not optional.** Until that write happens the round has no results
+id and no Live Race Media id, so `/live` falls back to the most recently cached
+id — `ORDER BY event_date DESC`, which today is **Ironman's `7478`, an MX feed**.
+The fallback is documented as safe because the feed is series-wide, but it has
+never been exercised across a series boundary, and SMX is not MX. This was fixed
+by hand at RedBud, Southwick and Denver; the script is that dig, scripted. It
+**refuses to adopt a round we have already closed**, so it cannot publish
+Ironman under Columbus's name.
 
 ```bash
 curl -s "$API/live/sessions" | python -c "import sys,json;[print(x['label'],x['status']) for x in json.load(sys.stdin)['sessions']]"
 ```
 
 - [ ] It names **Columbus** sessions, not Ironman
-- [ ] `lrm_id` is populated for the round. If it is still NULL, `/live` falls back to the most recently cached id — documented to work because the feed is series-wide, but **never exercised on an SMX round.** Watch the first live board carefully if so.
 
 **Then ship the SMX session chips** — 5 minutes, no build, from real labels:
 
