@@ -430,6 +430,18 @@ def _coarse_gap(g):
 # interval costs nothing but a wake-up from sleep.
 _LA_IDLE_INTERVAL_S = 300
 
+# Interruptible, so starting a mock does not mean waiting up to five minutes
+# for the loop to notice. That delay cost two partly-wasted test runs on 09-02:
+# the loop was asleep through a whole gate phase and green flag while someone
+# watched a placeholder card. Off race day the wait is unchanged; a real window
+# opens four hours before the gate, so nothing there depends on this.
+_LA_WAKE = threading.Event()
+
+
+def _la_wake_now() -> None:
+    """Cut the idle sleep short. Safe to call from any thread."""
+    _LA_WAKE.set()
+
 
 _LAPPED_RE = re.compile(r"^L\s*(\d+)$", re.I)
 
@@ -767,7 +779,11 @@ def _live_activity_loop():
                                  "activities", ended)
                 except Exception:
                     log.exception("live-activity: end-on-window-close failed")
-            time.sleep(_LA_IDLE_INTERVAL_S)
+            # Sleeps the full interval unless something wakes us — starting a
+            # mock does. Returns immediately if the flag is already set, so a
+            # start that lands mid-check is not lost.
+            _LA_WAKE.wait(_LA_IDLE_INTERVAL_S)
+            _LA_WAKE.clear()
             continue
         was_open = True
         try:
@@ -2053,23 +2069,40 @@ def _combined_qualifying(race_name, live_riders):
 
 @app.post("/debug/mock-race")
 def mock_race(minutes: int = 12, key: str = "", stop: bool = False,
-              sessions: int = 1):
+              sessions: int = 1, push_to_start: bool = False):
     """Drive a synthetic race through the real live path. See src/mockrace.py.
 
     Guarded by MXT_MOCK_KEY: unset, this 404s and the feature does not exist.
-    v1.5 is on the App Store, so a run is labelled plainly as a system test —
-    it exercises the machinery without telling anyone a race is happening.
+    A run is labelled plainly as a system test — it exercises the machinery
+    without telling anyone a race is happening.
+
+    `push_to_start=true` is the one thing that reaches OTHER people's phones
+    without them opening the app, so it is opt-in and off by default.
     """
     want = os.environ.get("MXT_MOCK_KEY")
     if not want or key != want:
         raise HTTPException(status_code=404, detail="not found")
     if stop:
         return mockrace.stop()
+    if push_to_start:
+        # The loop fires push-to-start once per event, guarded by a `push_sent`
+        # row. Clear ours so an opt-in run can fire again — otherwise the very
+        # first test would be the only one that ever worked, which is the least
+        # useful possible outcome for the path we are trying to prove.
+        try:
+            with _pool.connection() as conn:
+                conn.execute("DELETE FROM push_sent WHERE key = %s",
+                             (f"lastart:{mockrace.PUSH_TO_START_EVENT_ID}",))
+        except Exception:
+            log.exception("mock: could not clear the push-to-start guard")
     # sessions>1 runs a PROGRAMME: moto, finish, next moto on the gate. The
     # seam between two sessions is the one thing a single-moto run cannot test,
     # and it is where the card has to pick up a new race name from a standing
     # start. See src/mockrace.py.
-    return mockrace.start(minutes, sessions=sessions)
+    run = mockrace.start(minutes, sessions=sessions, push_to_start=push_to_start)
+    # Don't make the caller wait out the idle sleep to see anything happen.
+    _la_wake_now()
+    return run
 
 
 @app.get("/live")
@@ -2087,7 +2120,9 @@ def live(demo: bool = False):
     # A mock run owns the live path entirely while it lasts: the app polls
     # this, the Live Activity loop diffs it and pushes it to real phones. That
     # is the point — the parts under test cannot tell it is synthetic.
-    _mock_event = {"event_id": 0, "series": "SMX",
+    # Zero unless the run opted into push-to-start, in which case it is truthy
+    # and the loop's start branch actually runs. See src/mockrace.py.
+    _mock_event = {"event_id": mockrace.event_id(), "series": "SMX",
                    "venue": mockrace.VENUE, "city": "Columbus",
                    "state": "OH", "round_label": "System test",
                    "event_date": None, "start_time_et": None,

@@ -207,3 +207,38 @@ def test_a_session_too_short_to_race_is_lengthened(monkeypatch):
             break
     assert saw_racing, "a run was accepted that can never go green"
     mockrace.stop()
+
+
+# --- push-to-start, the one path a mock could never reach --------------------
+# The loop guards it with `f"lastart:{ev_id}" if ev_id else None`, so the mock's
+# event_id of 0 skipped the branch entirely. That was deliberate — it stopped a
+# mock remote-launching a card onto other people's phones. The install count
+# turned out to be FOUR, not 35, so it is now opt-in instead of impossible.
+
+def test_a_mock_cannot_remote_launch_by_default(monkeypatch):
+    """The default must stay falsy. This is the safety property."""
+    clock = _Clock()
+    monkeypatch.setattr(mockrace.time, "time", clock)
+    mockrace.start(3, sessions=1)
+    assert mockrace.event_id() == 0
+    assert not mockrace.event_id(), "a truthy default would fire push-to-start"
+    mockrace.stop()
+
+
+def test_opting_in_gives_a_truthy_event_id(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(mockrace.time, "time", clock)
+    mockrace.start(3, sessions=1, push_to_start=True)
+    assert mockrace.event_id() == mockrace.PUSH_TO_START_EVENT_ID
+    assert mockrace.event_id(), "the loop's start branch keys off truthiness"
+    mockrace.stop()
+
+
+def test_the_mock_event_id_cannot_collide_with_a_real_one():
+    """Real event ids are small serials; the push_sent key is shared."""
+    assert mockrace.PUSH_TO_START_EVENT_ID > 100_000
+
+
+def test_nothing_running_reports_the_safe_id():
+    mockrace.stop()
+    assert mockrace.event_id() == mockrace.DEFAULT_EVENT_ID
