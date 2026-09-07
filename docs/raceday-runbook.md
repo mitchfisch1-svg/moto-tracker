@@ -119,7 +119,15 @@ token per round. One phone = 3/min. Forty phones = 120/min and that is fine.
 
 ## 4 · Around the first gate drop
 
-- [ ] `starts` climbs **once**, early, to roughly the start-token count. That is push-to-start remote-launching cards onto closed apps. Verified working 09-02.
+- [ ] `starts` climbs **once**, early, to roughly the start-token count. That is push-to-start remote-launching cards onto closed apps. Verified working 09-02 and again 09-07.
+
+🚨 **THEN OPEN MXT ONCE ON EVERY PHONE. This is not optional.**
+
+A card the server launched remotely is **frozen on its launch frame until the app is opened**. Verified 09-07: a card sat reading "on the gate" for two minutes while the race ran, then came alive 12 seconds after the app was opened. **Any tab works** — Standings is enough, you do not need Race Day.
+
+Skip this and that phone shows "on the gate" all afternoon while the race runs. Ten seconds per phone.
+
+*(The proper fix is native — observe `Activity.activityUpdates` in `OnCreate` and POST the token from Swift — which needs a build and App Store review. See the handoff.)*
 - [ ] `starts_failed` small or zero. A few `Unregistered` are dead tokens from old installs; the loop deletes them itself. **Non-zero `starts_failed` is not automatically bad** — check whether the tokens that failed were ones that should still exist.
 - [ ] The card drops "· on the gate" within ~10s of the flag. Measured 4–9s.
 
