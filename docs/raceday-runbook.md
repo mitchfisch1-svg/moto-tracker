@@ -52,24 +52,28 @@ python scripts/audit.py
 
 ## 2 · Once the site switches to Columbus
 
-The results site serves last week's event until this one goes on track. When it
-flips, three things become possible. **Run this every half hour from mid-morning
-— it tells you whether the switch has happened, and does the work when it has:**
+The results site serves last week's event until this one goes on track.
+
+✅ **THIS IS NOW AUTOMATIC.** `.github/workflows/adopt-round.yml` runs
+`adopt_round.py --write` **every 15 minutes** through the race window, so the
+round is adopted within a quarter hour of becoming possible. **You do not need
+to do anything.**
+
+- [ ] Confirm it landed: the [adopt-round workflow](https://github.com/mitchfisch1-svg/moto-tracker/actions/workflows/adopt-round.yml) has a green run whose log says **"written to event 29"**
+
+To check by hand, or if the workflow is failing:
 
 ```bash
-python scripts/adopt_round.py
+python scripts/adopt_round.py          # dry run, prints what it would do
+python scripts/adopt_round.py --write  # commit it
 ```
 
-It is a **dry run by default** and prints what it would do. When it reports the
-site is still serving Ironman, that is the normal pre-race state and there is
-nothing to do — check back later. When it names Columbus:
-
-```bash
-python scripts/adopt_round.py --write
-```
-
-- [ ] It reports **ALL CLEAR** and writes `source_url` + `lrm_id` onto Playoff 1
-- [ ] Any `WARN` about the S3 feed not answering is fine before cars are on track — re-run once qualifying starts
+**Two guards make the unattended write safe**, and both are tested:
+- it refuses any round we have **already closed** — the results homepage keeps
+  serving the previous round for days after it finishes;
+- it refuses to write unless the target event is **actually racing** (−8 h to
+  +9 h around its start), so an id we have simply never seen cannot be adopted
+  onto the wrong event. Override by hand with `--any-day`.
 
 **Why this is not optional.** Until that write happens the round has no results
 id and no Live Race Media id, so `/live` falls back to the most recently cached

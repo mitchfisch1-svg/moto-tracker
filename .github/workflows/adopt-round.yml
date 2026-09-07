@@ -1,0 +1,57 @@
+name: adopt-round
+
+# Point the app at the round the results site has just started serving, without
+# needing a human at a keyboard on race morning.
+#
+# A round has no results id until it goes on track, so events.source_url holds
+# the generic schedule URL and events.lrm_id is NULL. While that is true /live
+# cannot derive a Live Race Media id and falls back to the most recently cached
+# one — ORDER BY event_date DESC — which across a series boundary is the wrong
+# feed entirely. That was fixed by hand at RedBud, Southwick and Denver. This
+# runs the same fix every 15 minutes so it lands within a quarter of an hour of
+# becoming possible.
+#
+# SAFETY, because this writes to the live database unattended:
+#   * `_site_shows_this_round` refuses any round we have already closed out —
+#     the results homepage keeps serving the PREVIOUS round for days.
+#   * `within_race_window` refuses to write unless the target event is actually
+#     racing (-8h/+9h around its stored start). That is what stops an id we
+#     have simply never seen — another series, or next week posted early —
+#     being adopted onto the wrong event.
+#   * Re-running after a successful adopt is a no-op.
+#
+# The cron matches results.yml/warm.yml deliberately. An earlier version of
+# warm.yml polled every 5 min year-round and burned the Neon free CU-hour quota
+# by never letting the compute idle — this job opens a DB connection too, so it
+# stays inside race windows.
+on:
+  schedule:
+    - cron: "*/15 16-23 * * 5"   # Friday 16:00-23:59 UTC - MX runs WMX Moto 1 on Friday
+    - cron: "*/15 13-23 * * 6"   # Saturday 13:00-23:59 UTC (9am ET, when /live opens)
+    - cron: "*/15 0-8 * * 0"     # Sunday 00:00-08:59 UTC
+  workflow_dispatch:
+    inputs:
+      any_day:
+        description: "Allow a write outside the event's race window"
+        type: boolean
+        default: false
+
+jobs:
+  adopt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # requirements-api.txt, not the full pipeline set: the script imports
+      # src/api/main.py for the guard and src/db.py for the connection.
+      - run: pip install -r requirements-api.txt
+
+      - name: Adopt the round the results site is serving
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python scripts/adopt_round.py --write \
+            ${{ inputs.any_day && '--any-day' || '' }}

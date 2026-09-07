@@ -38,6 +38,7 @@ the normal state before a round starts), 1 = something needs a human.
 """
 
 import argparse
+import datetime
 import pathlib
 import re
 import sys
@@ -149,6 +150,34 @@ def finished_ids(events):
                         for e in events if e["status"] == "final") if i}
 
 
+# How far either side of a round's stored start time a write is allowed. The
+# stored time is when COVERAGE begins, the window opens 4 h before it, and a
+# programme can run long — so this is deliberately generous at both ends while
+# still being nowhere near another weekend.
+RACE_WINDOW_BEFORE_H = 8
+RACE_WINDOW_AFTER_H = 9
+
+
+def within_race_window(event, now=None):
+    """Is this event actually racing around now?
+
+    Unattended, this is the guard that matters. `_site_shows_this_round` stops
+    us adopting a round we have already CLOSED, but it cannot stop us adopting
+    an id we have simply never seen — a different series, or next week's round
+    posted early. Run by hand on race morning that is fine, because a human is
+    reading the venue. Run every 15 minutes by a scheduler, it is how the wrong
+    event ends up wearing this weekend's name.
+    """
+    start = event.get("start_time_utc")
+    if start is None:
+        return False
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=datetime.timezone.utc)
+    delta_h = (now - start).total_seconds() / 3600
+    return -RACE_WINDOW_BEFORE_H <= delta_h <= RACE_WINDOW_AFTER_H
+
+
 def pick_target(events, explicit_id):
     if explicit_id:
         for e in events:
@@ -171,6 +200,8 @@ def main():
                     help="target this event instead of the next unfinished one")
     ap.add_argument("--force", action="store_true",
                     help="overwrite a source_url that already names a round")
+    ap.add_argument("--any-day", action="store_true",
+                    help="allow a write outside the target event's race window")
     args = ap.parse_args()
 
     print("\n== what the results site is serving ==")
@@ -260,6 +291,16 @@ def main():
             print("\n== the change ==")
             say(INFO, f"events.source_url -> {new_url}")
             say(INFO, f"events.lrm_id     -> {lrm or '(left as is)'}")
+
+            in_window = within_race_window(target)
+            if not in_window and not args.any_day:
+                say(OK, "not this event's race day — refusing to write.")
+                say(INFO, f"  gate {target['start_time_utc']:%Y-%m-%d %H:%M} UTC; "
+                          f"a write is allowed from -{RACE_WINDOW_BEFORE_H}h to "
+                          f"+{RACE_WINDOW_AFTER_H}h around it.")
+                say(INFO, "  This is the guard that makes running unattended "
+                          "safe. Pass --any-day to override by hand.")
+                return finish()
 
             if not args.write:
                 print("\nDry run. Nothing was written. Re-run with --write to "

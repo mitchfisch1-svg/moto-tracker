@@ -122,6 +122,43 @@ def test_no_unfinished_rounds_means_no_target():
     assert adopt.pick_target([event(28, status="final")], None) is None
 
 
+# --- the guard that makes running unattended safe -----------------------------
+
+def at(hours_from_gate):
+    """A clock reading `hours_from_gate` relative to the 2026-09-12 18:30 gate."""
+    return (datetime.datetime(2026, 9, 12, 18, 30, tzinfo=datetime.timezone.utc)
+            + datetime.timedelta(hours=hours_from_gate))
+
+
+@pytest.mark.parametrize("hours,expected", [
+    (0, True),        # on the gate
+    (-4, True),       # the live window opens here
+    (-7.9, True),     # early race morning
+    (-8.1, False),    # the night before
+    (4, True),        # mid-programme
+    (8.9, True),      # a programme that has run very long
+    (9.1, False),     # the small hours afterwards
+    (-24 * 7, False), # last weekend
+    (24 * 7, False),  # next weekend
+])
+def test_a_write_is_only_allowed_around_this_event_s_own_race(hours, expected):
+    ev = event(29)
+    assert adopt.within_race_window(ev, now=at(hours)) is expected
+
+
+def test_an_event_with_no_start_time_is_never_in_window():
+    ev = event(29)
+    ev["start_time_utc"] = None
+    assert adopt.within_race_window(ev, now=at(0)) is False
+
+
+def test_a_naive_start_time_is_treated_as_utc_not_crashed_on():
+    # Everything stores tz-aware, but a naive value must not raise mid-race.
+    ev = event(29)
+    ev["start_time_utc"] = datetime.datetime(2026, 9, 12, 18, 30)
+    assert adopt.within_race_window(ev, now=at(1)) is True
+
+
 # --- the guard this whole tool exists to respect ------------------------------
 
 @pytest.mark.parametrize("theirs,ours,done,expected", [
