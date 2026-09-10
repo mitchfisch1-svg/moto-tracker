@@ -493,7 +493,10 @@ def _la_content_state(payload):
         # (09-01): "if they're on the gate they would have no times". Right.
         # The column goes blank until the flag flies. Blank, not zeroes:
         # "0.000" is a time, and claiming a time is the thing to avoid.
-        staged = state == "staged"
+        # A delay is the same story: the track is quiet, so there are no gaps to
+        # report. Whatever times the feed is still holding belong to a session
+        # that has stopped.
+        staged = state in ("staged", "delayed")
         # And once the flag is out, P1 is not "Leader" — he WON. Leader is a
         # present-tense word about a race still being run; leaving it on a
         # finished board describes something that is no longer happening.
@@ -517,6 +520,10 @@ def _la_content_state(payload):
     name = (t.get("race_name") or "On track")
     if state == "staged":
         name = f"{name} · on the gate"
+    elif state == "delayed":
+        # Says what is true — racing is due and nothing is moving — without
+        # claiming a cause we cannot see from the feed.
+        name = f"{name} · delayed"
     elif state == "finished":
         name = f"{name} · final"
     return {
@@ -1839,6 +1846,36 @@ def _race_finished(timing) -> bool:
 _STALL_RACING_S = 240      # 4 min frozen after the clock dies = it's over
 _STALL_STAGED_S = 1800     # 30 min of an unchanged grid = not a real gate
 
+# ...unless the racing itself is paused, which looks EXACTLY the same: dead
+# clock, frozen order, nobody on track. A red flag or a weather hold routinely
+# runs 30-90 minutes, and treating that as a phantom grid retires the round and
+# puts final results on the lock screen while the mains are still to come.
+#
+# What separates the two is WHEN. The bug this stall rule was written for was a
+# grid sitting at 11:51 PM for an 8 AM session — a day out of place. A pause
+# happens during the racing hours. So inside them, a stalled grid means waiting;
+# outside them it means the grid is not real.
+_DELAY_WINDOW_PRE_S = 1 * 3600    # from an hour before the stored start...
+_DELAY_WINDOW_POST_S = 9 * 3600   # ...to nine hours after it
+
+
+def _racing_is_merely_paused(ev, now=None) -> bool:
+    """Is this dead grid a delay rather than a grid published early?
+
+    Deliberately a clock question, not a weather one. We cannot know WHY the
+    track is quiet — rain, a red flag, a medical hold, track repair — and
+    claiming a reason we do not have is the failure this app keeps repeating.
+    All we can honestly say is that racing was due and nothing is moving.
+    """
+    start = ev.get("start_time_utc")
+    if start is None:
+        return False
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=datetime.timezone.utc)
+    delta = (now - start).total_seconds()
+    return -_DELAY_WINDOW_PRE_S <= delta <= _DELAY_WINDOW_POST_S
+
 
 def _order_signature(timing) -> str:
     """The running order as one comparable string.
@@ -2323,6 +2360,14 @@ def live(demo: bool = False):
     # off the lock screen: everything downstream gates on `live`, and without
     # this the flag was computed and then ignored — which is how "250 Group B
     # Qualifying 1 - on the gate" sat there at 11:51 PM for an 8 AM session.
+    if timing.get("stale_grid") and _racing_is_merely_paused(ev):
+        # Racing was due and the track has gone quiet: a hold, not a phantom.
+        # Keep the round live and say so, rather than retiring a day that has
+        # not finished. The gap column stays blank exactly as it does on the
+        # gate — nobody is putting in a lap either way.
+        timing.pop("stale_grid", None)
+        timing["race_state"] = "delayed"
+
     if timing.get("stale_grid"):
         # WHICH side of the racing the dead grid is on decides what it means.
         # Before the gate it was published early and there is nothing on yet.
