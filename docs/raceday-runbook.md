@@ -125,12 +125,23 @@ token per round. One phone = 3/min. Forty phones = 120/min and that is fine.
 
 - [ ] `starts` climbs **once**, early, to roughly the start-token count. That is push-to-start remote-launching cards onto closed apps. Verified working 09-02 and again 09-07.
 
-🚨 **THEN OPEN MXT ONCE ON EVERY PHONE STILL RUNNING 1.6.0.**
+🚨 **BEFORE RACE DAY: every phone should be on 1.6.1 AND have been opened once since updating.**
 
-| the phone runs | what to do |
+**1.6.1 went live on the App Store 09-08.** Do this on each of the four installs
+in the days beforehand, not on race morning:
+
+1. Update to **1.6.1** from the App Store
+2. **Open MXT once** afterwards — any tab
+
+Step 2 is a precaution, not a proven requirement: a new binary registers its own
+push-to-start token when it first runs, and it is not established that the old
+build's token survives an update. If it does not, and the app never runs, that
+phone gets **no card at all**. Ten seconds removes the doubt.
+
+| the phone runs | on race day |
 |---|---|
-| **1.6.1 (build 82) or later** | **nothing.** The card adopts itself and tracks the whole day untouched. Proven twice on 09-07 with the phone never touched. |
-| **1.6.0 (build 80)** | **open MXT once.** Any tab — Standings is enough, you do not need Race Day. |
+| **1.6.1 (build 82)** | **nothing.** The card adopts itself and tracks the day untouched. Proven twice on 09-07 with the phone never touched. |
+| **1.6.0 (build 80)** | **open MXT once** after push-to-start fires. Any tab — Standings is enough. |
 
 Check which one a phone is on: **Settings → the bottom line.**
 
