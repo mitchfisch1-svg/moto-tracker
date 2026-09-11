@@ -134,7 +134,8 @@ token per round. One phone = 3/min. Forty phones = 120/min and that is fine.
 
 ## 4 · Around the first gate drop
 
-- [ ] `starts` climbs **once**, early, to roughly the start-token count. That is push-to-start remote-launching cards onto closed apps. Verified working 09-02 and again 09-07.
+- [ ] `starts` jumps **once**, early, to roughly the start-token count — push-to-start remote-launching cards onto closed apps. Verified 09-02, 09-07 and 09-11.
+- [ ] **After that it may keep ticking up by one at a time — that's healthy.** Since 09-11 (`45ade30`) push-to-start is per PHONE, so each person who installs during the race gets their own card on the next push (~20 s while racing, up to 2 min during a hold). **What would be wrong is `starts` climbing by the whole token count again** — that would mean cards stacking on phones that already have one. Verified it doesn't: 12+ cycles flat after the burst.
 
 🚨 **BEFORE RACE DAY: every phone should be on 1.6.1 AND have been opened once since updating.**
 
