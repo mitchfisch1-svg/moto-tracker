@@ -395,6 +395,47 @@ _LA_INTERVAL_S = 10
 _LA_MIN_GAP_S = 20
 
 
+# Push-to-start, once per TOKEN rather than once per event.
+#
+# It used to be one `lastart:{event}` key: the first cycle pushed every start
+# token on file, marked the event done, and never pushed again. So anyone who
+# installed after the race window opened got no card sent to them — ever. For a
+# showcase weekend that is backwards: the people seeing a post about the app
+# install DURING the race, which is exactly who the once-per-event rule skipped.
+# Found 09-11, the night before Columbus.
+#
+# `_LA_STARTED` is a backstop, not the record. The record is `push_sent`. But if
+# the write that records a launch ever failed after the push succeeded, the next
+# cycle would launch that card AGAIN, every 10 seconds, stacking cards on one
+# lock screen. Remembering in-process what we pushed makes that impossible
+# short of a redeploy — and nothing deploys during a race.
+_LA_STARTED: set = set()          # (event_id, token) launched by this process
+_LA_STARTED_LOCK = threading.Lock()
+
+
+def _lastart_key(ev_id, token) -> str:
+    return f"lastart:{ev_id}:{token}"
+
+
+def _tokens_to_start(rows, ev_id, recorded, in_process) -> set:
+    """Start tokens that have not had a card launched for this event yet.
+
+    `recorded` is the push_sent keys already written; `in_process` is the
+    (event_id, token) pairs this process has launched, recorded or not.
+    """
+    out = set()
+    for r in rows or []:
+        if not r or r.get("kind") != "start":
+            continue
+        tok = r.get("token")
+        if not tok:
+            continue
+        if _lastart_key(ev_id, tok) in recorded or (ev_id, tok) in in_process:
+            continue
+        out.add(tok)
+    return out
+
+
 def _la_change_key(state):
     """The parts of a pushed state that mean something changed.
 
@@ -819,21 +860,42 @@ def _live_activity_loop():
                             continue
                         last_state = key
                         stale = []
-                        # Once per event: remotely launch the activity on every
-                        # phone that registered a push-to-start token (iOS 17.2+)
-                        # — lock screens light up without the app being opened.
+                        # Remotely launch the activity on every phone with a
+                        # push-to-start token (iOS 17.2+) that has not had one
+                        # launched for this event — lock screens light up
+                        # without the app being opened, INCLUDING for someone
+                        # who installed an hour into the race. See
+                        # _tokens_to_start.
+                        #
+                        # Isolated in its own guard on purpose. If picking the
+                        # tokens fails, the answer is "launch nobody this
+                        # cycle" — which is today's behaviour for a late
+                        # install — and the update pushes below, the ones
+                        # keeping every EXISTING card live, carry on untouched.
                         ev_id = (payload.get("event") or {}).get("event_id")
-                        start_key = f"lastart:{ev_id}" if ev_id else None
-                        started = True
-                        if start_key:
-                            with _pool.connection() as conn:
-                                started = conn.execute(
-                                    "SELECT 1 FROM push_sent WHERE key = %s",
-                                    (start_key,)).fetchone() is not None
+                        to_start = set()
+                        if ev_id:
+                            try:
+                                recorded = {r["key"] for r in query(
+                                    "SELECT key FROM push_sent WHERE key LIKE %s",
+                                    (f"lastart:{ev_id}:%",))}
+                                with _LA_STARTED_LOCK:
+                                    in_process = set(_LA_STARTED)
+                                to_start = _tokens_to_start(
+                                    rows, ev_id, recorded, in_process)
+                            except Exception:
+                                log.exception("live-activity: start lookup failed")
+                                to_start = set()
+                        # Claim them BEFORE pushing, so even a crash between the
+                        # push and the database write cannot launch a second
+                        # card on the next cycle.
+                        if to_start:
+                            with _LA_STARTED_LOCK:
+                                _LA_STARTED.update((ev_id, t) for t in to_start)
                         sent = failed = 0
                         with httpx.Client(http2=True, timeout=15) as client:
                             for row in rows:
-                                if row["kind"] == "start" and not started:
+                                if row["kind"] == "start" and row["token"] in to_start:
                                     # Read the OUTCOME. This return value used
                                     # to be discarded, with two consequences,
                                     # both found on 09-02 by asking why 35
@@ -886,11 +948,20 @@ def _live_activity_loop():
                                 if reason in ("BadDeviceToken", "Unregistered",
                                               "ExpiredToken"):
                                     stale.append(row["token"])
-                        if start_key and not started:
-                            with _pool.connection() as conn:
-                                conn.execute(
-                                    "INSERT INTO push_sent (key) VALUES (%s) "
-                                    "ON CONFLICT (key) DO NOTHING", (start_key,))
+                        # Record each launch, one row per token. A failure here
+                        # is survivable: _LA_STARTED already stops a repeat in
+                        # this process, so the worst case is re-launching after
+                        # a redeploy — and nothing deploys during a race.
+                        if to_start:
+                            try:
+                                with _pool.connection() as conn:
+                                    for t in to_start:
+                                        conn.execute(
+                                            "INSERT INTO push_sent (key) VALUES (%s) "
+                                            "ON CONFLICT (key) DO NOTHING",
+                                            (_lastart_key(ev_id, t),))
+                            except Exception:
+                                log.exception("live-activity: start record failed")
                         if stale:
                             with _pool.connection() as conn:
                                 conn.execute(
@@ -2159,12 +2230,19 @@ def mock_race(minutes: int = 12, key: str = "", stop: bool = False,
         # row. Clear ours so an opt-in run can fire again — otherwise the very
         # first test would be the only one that ever worked, which is the least
         # useful possible outcome for the path we are trying to prove.
+        # Per-token since 09-11, so clear every token's row for the mock event,
+        # the old per-event row, AND this process's memory of launching them —
+        # miss the last and a second opt-in run would silently launch nothing.
+        mock_ev = mockrace.PUSH_TO_START_EVENT_ID
         try:
             with _pool.connection() as conn:
-                conn.execute("DELETE FROM push_sent WHERE key = %s",
-                             (f"lastart:{mockrace.PUSH_TO_START_EVENT_ID}",))
+                conn.execute("DELETE FROM push_sent WHERE key = %s OR key LIKE %s",
+                             (f"lastart:{mock_ev}", f"lastart:{mock_ev}:%"))
         except Exception:
             log.exception("mock: could not clear the push-to-start guard")
+        with _LA_STARTED_LOCK:
+            _LA_STARTED.difference_update(
+                {p for p in _LA_STARTED if p[0] == mock_ev})
     # sessions>1 runs a PROGRAMME: moto, finish, next moto on the gate. The
     # seam between two sessions is the one thing a single-moto run cannot test,
     # and it is where the card has to pick up a new race name from a standing
