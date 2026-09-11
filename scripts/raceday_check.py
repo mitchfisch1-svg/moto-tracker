@@ -109,10 +109,21 @@ def check_sessions(live, live_ev):
     say(INFO, f"serving: {name!r}  (smx id {smx})  {len(sessions)} sessions")
 
     nxt = (live.get("next_event") or {})
-    expected_venue = (live_ev or nxt).get("venue")
+    ours = live_ev or nxt
+    expected_venue = ours.get("venue")
     if not expected_venue:
         return
-    matches = expected_venue.lower() in (name or "").lower()
+    # Match on the venue OR the city. The results site names a round by CITY
+    # ("SMX Playoff 1 - Columbus, OH") while our schedule names it by STADIUM
+    # ("Historic Crew Stadium"), so venue alone flagged the right round as the
+    # false-LIVE bug for all of Columbus's Friday practice (09-11). It was
+    # written against MX, where the venue and the town are the same word.
+    # ⚠️ A city can host several rounds in one season (Anaheim runs three), so
+    # a city match cannot tell A1 from A2. Fine for the playoffs; revisit
+    # before January if it matters.
+    site = (name or "").lower()
+    city = (ours.get("city") or "").strip().lower()
+    matches = expected_venue.lower() in site or (len(city) > 2 and city in site)
     if matches:
         say(OK, f"the site is serving THIS round ({expected_venue})")
     elif live.get("live"):
