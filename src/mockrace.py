@@ -61,6 +61,20 @@ FINISH_S = 60             # the finishing order stays up before the next session
 # screen. This makes that possible without waiting for a real race day.
 DAY_DONE_S = 120
 
+# A held gate: the grid is set, racing is due, and nothing moves. `hold_s`
+# splits each session's gate into on-the-gate -> DELAYED -> green, which is the
+# shape of a weather hold before a race. Added 09-11 for the rain-delay work:
+# the server can now report `race_state: "delayed"`, the card and the app both
+# render it, and none of that had ever been drawn on a phone.
+#
+# ⚠️ This exercises the RENDERING, not the DETECTION. `/live` returns a mock's
+# timing before the real stall logic runs, so a mock hold says "delayed"
+# directly. Deciding that a real stalled grid IS a delay is
+# `_racing_is_merely_paused` in main.py, and that is covered by
+# tests/test_rain_delay.py — it needs 30 minutes of a frozen grid, which is
+# no test anybody will sit through.
+MAX_HOLD_S = 600          # a delay you can watch, not one you have to wait out
+
 # Points for a main-event finish, so the end-of-day card carries the number a
 # result actually means rather than a blank column.
 _POINTS = [25, 22, 20, 18, 16, 15, 14, 13, 12, 11]
@@ -85,7 +99,7 @@ _FIELD = [
 
 
 def start(minutes: int, seed: int = 7, sessions: int = 1,
-          push_to_start: bool = False) -> dict:
+          push_to_start: bool = False, hold_s: int = 0) -> dict:
     """Begin a run of `sessions` back-to-back sessions. Returns its status.
 
     Each session is `minutes` long (two of them on the gate, the rest racing)
@@ -102,11 +116,13 @@ def start(minutes: int, seed: int = 7, sessions: int = 1,
     # a test of anything this file exists to test.
     minutes = max(MIN_MINUTES, min(int(minutes), MAX_MINUTES))
     sessions = max(1, min(int(sessions), MAX_SESSIONS))
+    hold_s = max(0, min(int(hold_s or 0), MAX_HOLD_S))
     with _lock:
-        racing = sessions * (minutes * 60 + FINISH_S)
+        racing = sessions * (minutes * 60 + hold_s + FINISH_S)
         _run = {
             "started_at": time.time(),
             "session_s": minutes * 60,
+            "hold_s": hold_s,
             "sessions": sessions,
             "racing_s": racing,
             # The run stays "running" through the day-complete phase on
@@ -140,7 +156,8 @@ def _phase(elapsed: float, run: dict):
     One session is `session_s` of gate-then-racing followed by FINISH_S of
     finishing order. Everything past the last one is over.
     """
-    block = run["session_s"] + FINISH_S
+    hold = run.get("hold_s", 0)
+    block = run["session_s"] + hold + FINISH_S
     if elapsed >= run["racing_s"]:
         # Racing is over for the day. Still "running" so the loop's window
         # stays open — see the note on duration_s in start().
@@ -149,7 +166,13 @@ def _phase(elapsed: float, run: dict):
     within = elapsed - idx * block
     if within < GATE_S:
         return idx, within, "staged"
-    if within < run["session_s"]:
+    # The hold sits between the gate and the green flag: the grid is set and
+    # nothing moves. Racing then runs its full length afterwards, so a hold
+    # delays the race rather than eating into it — which is what a real one
+    # does.
+    if within < GATE_S + hold:
+        return idx, within, "delayed"
+    if within < run["session_s"] + hold:
         return idx, within, "racing"
     return idx, within, "finished"
 
@@ -242,14 +265,23 @@ def timing():
     # transition but not that the card actually re-renders new content.
     seed = run["seed"] + idx * 101
     racing_s = run["session_s"] - GATE_S
+    hold = run.get("hold_s", 0)
     if state == "staged":
         # Two minutes on the gate, then green — so the staged -> racing
         # transition the lock screen missed at Ironman happens every session,
         # not just once a run.
         remaining, flag, order_t = None, "prestage", 0.0
+    elif state == "delayed":
+        # Held: the gate order, frozen, and no clock. Exactly what the feed
+        # looks like during a weather hold, and exactly what the stall rule
+        # used to mistake for a grid published early.
+        remaining, flag, order_t = None, "red", 0.0
     elif state == "racing":
-        remaining, flag = max(0, int(run["session_s"] - within)), "green"
-        order_t = within - GATE_S
+        # The clock and the order both start counting from the green flag,
+        # after any hold — a delayed race is still a full-length race.
+        remaining = max(0, int(run["session_s"] + hold - within))
+        flag = "green"
+        order_t = within - GATE_S - hold
     else:
         # Finished: the order freezes and the clock reads zero. This is what
         # `_la_content_state` turns into "· final", and what the app shows

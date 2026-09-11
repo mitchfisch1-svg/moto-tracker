@@ -2139,7 +2139,7 @@ def _combined_qualifying(race_name, live_riders):
 
 @app.post("/debug/mock-race")
 def mock_race(minutes: int = 12, key: str = "", stop: bool = False,
-              sessions: int = 1, push_to_start: bool = False):
+              sessions: int = 1, push_to_start: bool = False, hold: int = 0):
     """Drive a synthetic race through the real live path. See src/mockrace.py.
 
     Guarded by MXT_MOCK_KEY: unset, this 404s and the feature does not exist.
@@ -2169,7 +2169,12 @@ def mock_race(minutes: int = 12, key: str = "", stop: bool = False,
     # seam between two sessions is the one thing a single-moto run cannot test,
     # and it is where the card has to pick up a new race name from a standing
     # start. See src/mockrace.py.
-    run = mockrace.start(minutes, sessions=sessions, push_to_start=push_to_start)
+    # hold=N holds each session's gate for N seconds as "delayed" before the
+    # green flag — the shape of a weather hold. Renders the delayed card and
+    # app state on a real phone; see the note on MAX_HOLD_S in mockrace.py for
+    # why it tests the drawing and not the detection.
+    run = mockrace.start(minutes, sessions=sessions,
+                         push_to_start=push_to_start, hold_s=hold)
     # Don't make the caller wait out the idle sleep to see anything happen.
     _la_wake_now()
     return run
