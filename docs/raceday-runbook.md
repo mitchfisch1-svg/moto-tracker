@@ -54,10 +54,21 @@ python scripts/audit.py
 
 The results site serves last week's event until this one goes on track.
 
-✅ **THIS IS NOW AUTOMATIC.** `.github/workflows/adopt-round.yml` runs
-`adopt_round.py --write` **every 15 minutes** through the race window, so the
-round is adopted within a quarter hour of becoming possible. **You do not need
-to do anything.**
+✅ **COLUMBUS IS ALREADY ADOPTED** — done by hand Friday 09-11 (event 29 →
+`517544`, feed `7478`). Nothing to do for this round.
+
+⚠️ **Don't lean on the automation for future rounds.** `.github/workflows/adopt-round.yml`
+runs `adopt_round.py --write` every 15 minutes in theory, but GitHub's scheduler
+was firing hourly jobs every **5–6 hours** on 09-11 — so it may fire once, late.
+And **SMX runs a Friday programme**: the site switches a day before the stored
+start, which the script's −8h guard refuses. For SMX, adopt by hand as soon as
+the site switches:
+
+```bash
+python scripts/adopt_round.py --write --any-day
+```
+
+— after reading the venue it names and confirming it's the right round.
 
 - [ ] Confirm it landed: the [adopt-round workflow](https://github.com/mitchfisch1-svg/moto-tracker/actions/workflows/adopt-round.yml) has a green run whose log says **"written to event 29"**
 
@@ -165,6 +176,15 @@ On 1.6.0 a remotely-launched card is **frozen on its launch frame until the app 
 **If the card lags:** raise `_LA_MIN_GAP_S` 20 → 30 (main.py). ~60 pushes/moto
 instead of ~89. **Transitions do NOT get slower** — they are bounded by the 10s
 loop interval, not the floor. Backend only, live in minutes.
+
+## 5½ · After the last main
+
+- [ ] **Standings moved within an hour of the checkered.** Results ingest runs in
+  GitHub's `results.yml`, which is throttled (see section 2). If they haven't:
+
+```bash
+python -m src.pipeline.run_results --smx-id 517544
+```
 
 ## 6 · Between sessions
 
