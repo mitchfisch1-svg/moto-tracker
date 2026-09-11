@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
 from src.api.main import _overall_block_is_settled  # noqa: E402
+from src.config import get_database_url  # noqa: E402
 
 
 def poisoned(cur):
@@ -58,7 +59,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+    with psycopg.connect(get_database_url()) as conn:
         with conn.cursor() as cur:
             hits = list(poisoned(cur))
             for key, updated, bad in hits:

@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
 from src.names import titlecase_name                    # noqa: E402
+from src.config import get_database_url  # noqa: E402
 from src.api.main import _overall_block_is_settled      # noqa: E402
 
 API = os.environ.get("MXT_API", "https://moto-tracker-api.onrender.com")
@@ -204,7 +205,7 @@ def main():
     http = not args.db_only
 
     failures = 0
-    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+    with psycopg.connect(get_database_url()) as conn:
         with conn.cursor() as cur:
             for name, motive, fn in _checks:
                 try:
