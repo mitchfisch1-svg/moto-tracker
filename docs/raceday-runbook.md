@@ -43,11 +43,12 @@ Reading it off the feed rather than the clock means **a rain delay carries the
 launch with it**: if racing slips to 5 PM, so do the cards.
 - [ ] So on the day: `starts` should stay **0 all morning** and jump when 250 Moto 1 goes on track. Morning zero is correct, not a fault.
 
-⚠️ **The closing card will read "450 Moto 2 · final", not the six-row 250+450
-card.** The playoffs run two motos per class; the six-row card reads sessions
-typed `main`, and motos are typed `moto`. It falls back to the last race's
-order — correct and correctly labelled, just not the two-class overall. Known,
-see the handoff.
+🏁 **The closing card should be the six-row 250 + 450 card**, built from the
+series' own published Overall (fixed 09-11, `4c2bca4`). Expect: class label on
+the first row of each block, three riders each, **points** down the right.
+
+- [ ] If only ONE class shows (three rows), that is correct-and-waiting: the site posts each class's Overall separately and the 450's lands minutes after the last moto. It fills in on the next push.
+- [ ] If it falls back to "450 Moto 2 · final", the Overall wasn't readable. Not a failure — that is the old behaviour, deliberately kept as the fallback.
 
 ⏱️ **2½ hours of margin** between racing ending and the window closing. Only a
 delay past **8:30 PM** puts the teardown at risk — see *If it all goes long*.
