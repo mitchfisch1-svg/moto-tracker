@@ -17,6 +17,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from ..db import upsert
+from ..sessions import classify  # moved; re-exported for callers
 from ..resolve.riders import RiderResolver
 from ..standings import points_for
 
@@ -36,7 +37,6 @@ POINTS_TYPES = {"main", "moto", "tc_race"}
 _RESULT_HEADER = ["POS", "#", "BIKE", "RIDER"]
 _POS_RE = re.compile(r"^(\d+|DNF|DNS|DSQ|DNQ)$", re.I)
 _LAPS_RE = re.compile(r"^(\d+)\s*/")
-_TC_RACE_RE = re.compile(r"RACE\s*#?\s*\d")
 
 # Bike makes we recognize inside team names. When several appear ("Troy Lee
 # Designs Red Bull GasGas"), the make is conventionally last, so we keep the
@@ -69,44 +69,6 @@ def manufacturer_from_team(team):
         if pos > best_pos:
             best, best_pos = real, pos
     return "GasGas" if best in ("GASGAS", "GAS GAS") else best
-
-
-def classify(label: str):
-    """Map a race label to (class, type). Returns (None, None) if unrecognized."""
-    up = label.upper()
-    if up.startswith("450"):
-        cls = "450"
-    elif up.startswith("250"):
-        cls = "250"
-    elif "WMX" in up:
-        cls = "WMX"
-    elif "SMX NEXT" in up:
-        cls = "SMX Next"
-    elif "250" in up and "SHOWDOWN" in up:
-        # Sponsor-prefixed finale, e.g. "Dave Coombs Sr. 250 East West Showdown"
-        cls = "250"
-    else:
-        cls = None
-
-    if "MAIN" in up:
-        typ = "main"
-    elif "SHOWDOWN" in up:
-        typ = "main"   # the East/West Showdown is that night's 250 main event
-    elif "MOTO" in up:
-        typ = "moto"
-    elif "LCQ" in up:
-        typ = "lcq"
-    elif "HEAT" in up:
-        typ = "heat"
-    elif "PRACTICE" in up:
-        typ = "practice"
-    elif "QUALIF" in up:
-        typ = "qualifying"
-    elif _TC_RACE_RE.search(up):  # '450 Race #1' — a Triple Crown race
-        typ = "tc_race"
-    else:
-        typ = None
-    return cls, typ
 
 
 class ResultsHTMLAdapter:

@@ -29,7 +29,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
-from ..adapters.results_html import classify
+from ..sessions import classify
 from ..apns import apns_ready, send_live_activity
 from ..names import display_surname, titlecase_name
 from ..config import get_database_url
