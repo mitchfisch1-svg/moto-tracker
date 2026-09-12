@@ -29,6 +29,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
+from ..adapters.results_html import classify
 from ..apns import apns_ready, send_live_activity
 from ..names import display_surname, titlecase_name
 from ..config import get_database_url
@@ -434,34 +435,69 @@ _LA_STARTED_LOCK = threading.Lock()
 # two: showing it too early loses the card either way, by Apple's clock or by
 # the user's thumb.
 #
-# One hour before the gate: the card arrives when the racing is obviously
-# imminent (Columbus: 14:00, ceremonies 14:30, first moto 15:06), the eight
-# hours reach ~22:00 against a last moto ending ~18:05, and only an hour of
-# lock-screen time is spent before anyone would want it. Lower this to launch
-# later still; raise it to launch earlier and spend more of both budgets.
-_LA_START_LEAD_S = 1 * 3600
+# The rule is per SERIES, because the days are shaped differently (Mitch,
+# 09-11).
+#
+# SMX PLAYOFFS run a programme that is most of a working day — qualifying at
+# 08:50, wildcards at noon, and the racing that counts starting at 15:06. So
+# wait for the first POINTS race and launch then. Reading it off the feed
+# rather than the clock also means a rain delay carries the card with it:
+# racing slips to 17:00 and so does the launch, instead of the card sitting on
+# a lock screen through the hold burning its eight hours.
+#
+# SX and MX launch as soon as the window opens, which is when qualifying
+# starts — those days are shorter and qualifying is the draw.
+#
+# ⚠️ SX IN JANUARY IS NOT SAFE UNDER THIS RULE. A supercross day runs
+# qualifying early afternoon and mains until ~22:00, past eight hours from
+# qualifying, so cards would die during the mains exactly as they would have
+# here. Revisit before A1 — the fix is the same one used for SMX.
+_LA_SMX_BACKSTOP_S = 90 * 60      # launch anyway this long after the gate
+_POINTS_TYPES = ("moto", "main")
 
 
-def _ready_to_launch(ev, now=None) -> bool:
-    """Close enough to the gate to be worth spending the 8 hours on?
-
-    Unknown or unparseable start time means yes — that is the behaviour this
-    had before, and a card that arrives too early beats no card at all.
-    """
+def _event_start(ev):
+    """The event's start as an aware datetime, or None if it cannot be read."""
     start = (ev or {}).get("start_time_utc")
-    if not start:
-        return True
     if isinstance(start, str):
         try:
             start = datetime.datetime.fromisoformat(start)
         except ValueError:
-            return True
+            return None
     if not isinstance(start, datetime.datetime):
-        return True
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=datetime.timezone.utc)
+        return None
+    return start if start.tzinfo else start.replace(tzinfo=datetime.timezone.utc)
+
+
+def _is_points_race(timing) -> bool:
+    """Is what's on track a race that scores — a moto or a main?
+
+    Practice, qualifying and the SMX wildcards all return False, which is the
+    whole point: they are not what someone wants a lock-screen card for.
+    """
+    try:
+        return classify((timing or {}).get("race_name") or "")[1] in _POINTS_TYPES
+    except Exception:
+        return False
+
+
+def _ready_to_launch(ev, timing=None, now=None) -> bool:
+    """Worth spending the Live Activity's eight hours on yet?
+
+    Degrades toward launching everywhere: an unreadable series, name or start
+    time gets a card, because too early beats never.
+    """
+    if (ev or {}).get("series") != "SMX":
+        return True                      # SX / MX: from the window opening
+    if _is_points_race(timing):
+        return True                      # the racing that counts is on track
+    start = _event_start(ev)
+    if start is None:
+        return True                      # cannot reason about it; old behaviour
+    # Backstop, so a feed that renames its sessions cannot mean nobody gets a
+    # card all day.
     now = now or datetime.datetime.now(datetime.timezone.utc)
-    return now >= start - datetime.timedelta(seconds=_LA_START_LEAD_S)
+    return now >= start + datetime.timedelta(seconds=_LA_SMX_BACKSTOP_S)
 
 
 def _lastart_key(ev_id, token) -> str:
@@ -925,7 +961,8 @@ def _live_activity_loop():
                         # keeping every EXISTING card live, carry on untouched.
                         ev_id = (payload.get("event") or {}).get("event_id")
                         to_start = set()
-                        if ev_id and _ready_to_launch(payload.get("event")):
+                        if ev_id and _ready_to_launch(payload.get("event"),
+                                                      payload.get("timing")):
                             try:
                                 recorded = {r["key"] for r in query(
                                     "SELECT key FROM push_sent WHERE key LIKE %s",
