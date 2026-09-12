@@ -412,6 +412,57 @@ _LA_MIN_GAP_S = 20
 _LA_STARTED: set = set()          # (event_id, token) launched by this process
 _LA_STARTED_LOCK = threading.Lock()
 
+# How close to the gate a card may be launched.
+#
+# iOS ends a Live Activity roughly EIGHT HOURS after it starts, whatever we do.
+# The race window opens 6 h before the gate so the app can show qualifying, and
+# launching cards then burns most of that budget before the racing anyone cares
+# about. Columbus, 09-12, off the published schedule:
+#
+#   08:30  window opens, cards launch
+#   ~16:30 iOS ends them, eight hours later
+#   16:51  250 Moto 2      <- dead lock screen
+#   17:29  450 Moto 2      <- dead lock screen
+#
+# and push-to-start will not relaunch, because each phone is launched once per
+# event by design.
+#
+# The system limit is only half the reason. A card parked on a lock screen from
+# breakfast through qualifying gets SWIPED, and a swipe is permanent for the
+# same once-per-phone reason — somebody opts out of the feature at 10 am and has
+# nothing for the motos. Mitch's point, 09-11, and the better argument of the
+# two: showing it too early loses the card either way, by Apple's clock or by
+# the user's thumb.
+#
+# One hour before the gate: the card arrives when the racing is obviously
+# imminent (Columbus: 14:00, ceremonies 14:30, first moto 15:06), the eight
+# hours reach ~22:00 against a last moto ending ~18:05, and only an hour of
+# lock-screen time is spent before anyone would want it. Lower this to launch
+# later still; raise it to launch earlier and spend more of both budgets.
+_LA_START_LEAD_S = 1 * 3600
+
+
+def _ready_to_launch(ev, now=None) -> bool:
+    """Close enough to the gate to be worth spending the 8 hours on?
+
+    Unknown or unparseable start time means yes — that is the behaviour this
+    had before, and a card that arrives too early beats no card at all.
+    """
+    start = (ev or {}).get("start_time_utc")
+    if not start:
+        return True
+    if isinstance(start, str):
+        try:
+            start = datetime.datetime.fromisoformat(start)
+        except ValueError:
+            return True
+    if not isinstance(start, datetime.datetime):
+        return True
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=datetime.timezone.utc)
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return now >= start - datetime.timedelta(seconds=_LA_START_LEAD_S)
+
 
 def _lastart_key(ev_id, token) -> str:
     return f"lastart:{ev_id}:{token}"
@@ -874,7 +925,7 @@ def _live_activity_loop():
                         # keeping every EXISTING card live, carry on untouched.
                         ev_id = (payload.get("event") or {}).get("event_id")
                         to_start = set()
-                        if ev_id:
+                        if ev_id and _ready_to_launch(payload.get("event")):
                             try:
                                 recorded = {r["key"] for r in query(
                                     "SELECT key FROM push_sent WHERE key LIKE %s",
