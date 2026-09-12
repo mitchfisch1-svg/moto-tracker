@@ -745,6 +745,76 @@ def _la_overall_state(event, by_class):
     }
 
 
+_OVERALL_PTS_RE = re.compile(r"(\d+)")
+
+
+def _overall_points(row):
+    """The points out of an Overall row's "50 pts", or None."""
+    m = _OVERALL_PTS_RE.search(str((row or {}).get("secondary") or ""))
+    return int(m.group(1)) if m else None
+
+
+def _overall_blocks_to_by_class(blocks):
+    """Round Overalls -> the shape the end-of-day card reads.
+
+    Only SETTLED boards count. The results site publishes a class's Overall as
+    soon as moto 1 is scored, with moto 2 as dashes, and it looks identical to
+    the finished thing — that is what `_overall_block_is_settled` exists for,
+    and showing a half-round as the day's result is the exact failure this card
+    was built to fix.
+
+    Nothing is computed here. The series publishes the combined table with each
+    rider's two finishes and the points they add up to; adding motos up
+    ourselves is what mis-scored championships all season.
+    """
+    out = {}
+    for b in blocks or []:
+        if not b or not _overall_block_is_settled(b):
+            continue
+        klass = classify((b.get("label") or ""))[0]
+        if klass not in _LA_OVERALL_CLASSES:
+            continue
+        rows = []
+        for r in b.get("rows") or []:
+            if r.get("position") is None:
+                continue
+            rows.append({"position": r.get("position"), "name": r.get("name"),
+                         "number": r.get("number"),
+                         "points": _overall_points(r)})
+        if rows:
+            out[klass] = rows
+    return out
+
+
+def _la_has_championship_classes(by_class) -> bool:
+    """Does this hold a result for a class the card actually shows?"""
+    return any((by_class or {}).get(k) for k in _LA_OVERALL_CLASSES)
+
+
+def _la_day_results_from_overalls(event_id):
+    """The day's result for a round that settles on MOTOS, not a main.
+
+    SMX playoffs and MX both run two motos a class, so `_la_day_results` — which
+    reads sessions typed `main` — finds nothing for 250/450 and the card fell
+    back to the last race's order. On 09-12 that would have been "450 Moto 2 ·
+    final": a real result, but one moto of one class standing in for the day.
+
+    Fails to None on anything at all, and the caller keeps the old fallback.
+    """
+    try:
+        rows = query("SELECT source_url, status FROM events WHERE id = %s",
+                     (event_id,))
+        if not rows:
+            return None
+        blocks = _event_overall(rows[0].get("source_url"),
+                                event_status=rows[0].get("status"),
+                                expected_classes=len(_LA_OVERALL_CLASSES))
+        return _overall_blocks_to_by_class(blocks) or None
+    except Exception:
+        log.exception("live-activity: could not read the round overall")
+        return None
+
+
 def _la_day_results(event_id):
     """Each championship class's decisive result, from the database.
 
@@ -1091,6 +1161,14 @@ def _live_activity_loop():
                             by_class = (payload.get("day_results")
                                         or (_la_day_results(ev.get("event_id"))
                                             if ev.get("event_id") else None))
+                            # Nothing for 250/450 means a round that settles on
+                            # MOTOS rather than a main — every SMX playoff and
+                            # every MX round. Take the series' own published
+                            # Overall; never add the motos up here.
+                            if (ev.get("event_id")
+                                    and not _la_has_championship_classes(by_class)):
+                                by_class = (_la_day_results_from_overalls(
+                                    ev["event_id"]) or by_class)
                             overall = (_la_overall_state(ev, by_class)
                                        if by_class else None)
                             final = overall or _la_final_state(payload)
