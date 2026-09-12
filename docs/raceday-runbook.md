@@ -13,14 +13,33 @@ API  = https://moto-tracker-api.onrender.com
 
 ## The day's shape
 
+The published schedule, which is a **TWO-MOTO** programme, not a single main:
+
 | ET | what |
 |---|---|
-| **10:30 AM** | race window OPENS (start − 4 h). The Live Activity loop wakes here. |
-| 9:00 AM | Race Day Live (Peacock) |
-| **2:30 PM** | Pre-Race Show — this is `start_time_utc`, so it is what the app counts down to |
-| **3:00 PM** | **Gate Drop** |
-| 6:00 PM | Post-Race |
-| **8:30 PM** | race window CLOSES (start + 6 h) |
+| **8:30 AM** | race window OPENS. The loop wakes; the app shows live timing from here |
+| 8:50 AM | Qualifying Practice (250, 450, SMX Next) |
+| 12:00 PM | 250 & 450 Wildcard Races |
+| **2:00 PM** | 🔔 **lock-screen cards launch** (gate − 1 h) — see below |
+| 2:30 PM | Opening Ceremonies — this is the stored `start_time_utc` |
+| **3:00 PM** | **Gate** (countdown target) · **3:06 PM 250 Moto 1** |
+| 3:43 PM | 450 Moto 1 |
+| 4:27 PM | SMX Next Main Event |
+| 4:51 PM | 250 Moto 2 |
+| **5:29 PM** | **450 Moto 2** — the last race |
+| **8:30 PM** | race window CLOSES |
+
+🔔 **Cards launch at 2:00 PM, NOT when the window opens.** iOS ends a Live
+Activity after ~8 hours, so a card launched at 8:30 AM would die around 4:30 PM
+— before both Moto 2s — and each phone is only launched once per event, so it
+would never come back. A card parked there all morning also just gets swiped,
+which is permanent for the same reason. `_LA_START_LEAD_S`, one constant.
+
+⚠️ **The closing card will read "450 Moto 2 · final", not the six-row 250+450
+card.** The playoffs run two motos per class; the six-row card reads sessions
+typed `main`, and motos are typed `moto`. It falls back to the last race's
+order — correct and correctly labelled, just not the two-class overall. Known,
+see the handoff.
 
 ⏱️ **2½ hours of margin** between racing ending and the window closing. Only a
 delay past **8:30 PM** puts the teardown at risk — see *If it all goes long*.
@@ -134,7 +153,7 @@ token per round. One phone = 3/min. Forty phones = 120/min and that is fine.
 
 ## 4 · Around the first gate drop
 
-- [ ] `starts` jumps **once**, early, to roughly the start-token count — push-to-start remote-launching cards onto closed apps. Verified 09-02, 09-07 and 09-11.
+- [ ] `starts` jumps **once**, at about **2:00 PM** (gate − 1 h — *not* when the window opens at 8:30), to roughly the start-token count. That is push-to-start remote-launching cards onto closed apps. Verified 09-02, 09-07 and 09-11.
 - [ ] **After that it may keep ticking up by one at a time — that's healthy.** Since 09-11 (`45ade30`) push-to-start is per PHONE, so each person who installs during the race gets their own card on the next push (~20 s while racing, up to 2 min during a hold). **What would be wrong is `starts` climbing by the whole token count again** — that would mean cards stacking on phones that already have one. Verified it doesn't: 12+ cycles flat after the burst.
 
 🚨 **BEFORE RACE DAY: every phone should be on 1.6.1 AND have been opened once since updating.**
