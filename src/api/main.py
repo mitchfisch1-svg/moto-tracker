@@ -481,6 +481,29 @@ def _is_points_race(timing) -> bool:
         return False
 
 
+def _widget_should_show_live(event, timing) -> bool:
+    """Should the home-screen standings widget show the running order?
+
+    Yes while something is on track — season points frozen at last week's total
+    are the wrong thing to stare at mid-moto.
+
+    EXCEPT for SMX, whose programme runs most of a working day: qualifying from
+    08:50 and wildcards at noon would occupy the widget for six hours before
+    the racing that counts. Mitch, 09-11, finding "250 Unseeded Qualifying 1"
+    on his home screen the night before Columbus — it should stay on the
+    championship until the motos are going. Same predicate as the lock-screen
+    card, so the two surfaces cannot disagree about what counts as racing.
+
+    SX and MX keep the old behaviour: shorter days, and their qualifying is
+    part of the draw.
+    """
+    if not timing:
+        return False
+    if (event or {}).get("series") == "SMX":
+        return _is_points_race(timing)
+    return True
+
+
 def _ready_to_launch(ev, timing=None, now=None) -> bool:
     """Worth spending the Live Activity's eight hours on yet?
 
@@ -3397,6 +3420,8 @@ def widget_standings():
     except Exception:
         lp = None
     lt = (lp or {}).get("timing") if (lp or {}).get("live") else None
+    if not _widget_should_show_live((lp or {}).get("event"), lt):
+        lt = None            # stay on the championship — see the function
     if lt:
         cq = lt.get("combined_qualifying")
         src = (cq.get("riders") if cq else lt.get("riders")) or []
