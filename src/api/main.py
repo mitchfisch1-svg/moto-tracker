@@ -1022,7 +1022,13 @@ def _live_activity_loop():
                     _cycle_started = time.time()
                     payload = live()
                     _LA_STATS["live_ms"] = int((time.time() - _cycle_started) * 1000)
-                    if payload.get("live") and payload.get("timing"):
+                    # A live session does not automatically earn a lock screen.
+                    # For SMX, qualifying and the wildcards do not — see
+                    # _ready_to_launch. Anything already up gets ended below.
+                    cards_wanted = _ready_to_launch(payload.get("event"),
+                                                    payload.get("timing"))
+                    if (payload.get("live") and payload.get("timing")
+                            and cards_wanted):
                         state = _la_content_state(payload)
                         # iOS budgets frequent Live Activity updates and silently
                         # starts dropping them once you blow through it — which is
@@ -1161,6 +1167,25 @@ def _live_activity_loop():
                             last_push = now_s
                             last_pushed = state
                             _LA_STATS["last_push_at"] = last_push
+                    elif payload.get("live") and payload.get("timing"):
+                        # Live, but not a session that earns a lock screen:
+                        # SMX qualifying and the wildcards.
+                        #
+                        # Not launching one is not enough. The APP starts a card
+                        # whenever anyone opens the Race Day tab, and the server
+                        # then keeps it fed — which on 09-12 left "250 Unseeded
+                        # Qualifying 1 · on the gate" sitting on a lock screen
+                        # through a torrential rain delay, five hours before a
+                        # moto, reading as though a race were seconds away. So
+                        # clear it. No card is the honest answer; qualifying is
+                        # still there in the app for anyone who wants it.
+                        cleared = _la_end_activities(None, 0)
+                        if cleared:
+                            _LA_STATS["cleared_early"] = (
+                                _LA_STATS.get("cleared_early", 0) + cleared)
+                            log.info("live-activity: cleared %d card(s) — %r "
+                                     "does not earn a lock screen", cleared,
+                                     (payload.get("timing") or {}).get("race_name"))
                     elif not payload.get("live"):
                         # Racing's over. End every activity and forget the tokens
                         # (fresh ones register next race day).
@@ -2115,7 +2140,14 @@ _STALL_STAGED_S = 1800     # 30 min of an unchanged grid = not a real gate
 # grid sitting at 11:51 PM for an 8 AM session — a day out of place. A pause
 # happens during the racing hours. So inside them, a stalled grid means waiting;
 # outside them it means the grid is not real.
-_DELAY_WINDOW_PRE_S = 1 * 3600    # from an hour before the stored start...
+# Widened 09-12 from one hour to eight. Columbus was rained out all morning and
+# the board read "250 Unseeded Qualifying 1 · on the gate" at 09:44 — five hours
+# before the gate, so outside the old window, so a stalled grid could only be
+# called a phantom (go dark) and never a delay (say so). Eight hours back covers
+# a race day from first practice while staying nowhere near the grid a provider
+# publishes the night before: Friday 23:00 is sixteen hours out and still reads
+# as a phantom, which is the Unadilla protection this rule exists for.
+_DELAY_WINDOW_PRE_S = 8 * 3600    # from eight hours before the stored start...
 _DELAY_WINDOW_POST_S = 9 * 3600   # ...to nine hours after it
 
 

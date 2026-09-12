@@ -49,11 +49,14 @@ def at(hours):
 @pytest.mark.parametrize("hours,paused", [
     (0, True),         # on the gate, held
     (-0.5, True),      # half an hour early — sighting laps due
-    (-1.1, False),     # well before racing; a grid here was published early
+    (-5.3, True),      # Columbus 09:44: rained out all morning, "on the gate"
+    (-7.9, True),      # first practice of a race day
+    (-8.1, False),     # the night before — a grid published early, not a delay
     (2, True),         # mid-programme hold
     (6.5, True),       # a day that has run very long
     (8.9, True),       # still inside the window
     (9.5, False),      # hours after everything; the feed is just sitting there
+    (-16, False),      # Friday 23:00 — the Unadilla grid, still a phantom
     (-24, False),      # the day before
     (24, False),       # the day after
 ])
