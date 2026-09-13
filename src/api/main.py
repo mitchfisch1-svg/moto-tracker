@@ -377,7 +377,19 @@ def _notify_loop():
 # so if the owner never opens it we can neither refresh nor end it. At Unadilla
 # one sat on a lock screen reading "450 Moto #2 · on the gate" hours after the
 # program finished. Better a visibly stale card than a confidently wrong one.
-_LA_STALE_S = 900
+# How long a pushed frame stays believable before iOS greys it out.
+#
+# Was 900 — a card that stopped being driven went on looking confident and
+# current for a quarter of an hour. At Columbus they were frozen for HOURS and
+# every one of them read like live timing: "450 Moto #2 · on the gate" while
+# the race had been run. We could not keep them fed; the least we can do is
+# stop them pretending.
+#
+# Floor is the loop's own heartbeat (120 s): anything shorter and a perfectly
+# healthy card greys out between quiet-period pushes. 180 gives one heartbeat
+# of margin, so a card goes visibly stale within about three minutes of the
+# push chain actually breaking.
+_LA_STALE_S = 180
 # ...and once the day is done, how long the finishing order stays on the lock
 # screen before iOS clears it on its own.
 # AN HOUR (Mitch, 08-31): the result is the thing people waited all afternoon
