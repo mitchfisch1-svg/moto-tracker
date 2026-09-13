@@ -2487,7 +2487,8 @@ def _combined_qualifying(race_name, live_riders):
 
 @app.post("/debug/mock-race")
 def mock_race(minutes: int = 12, key: str = "", stop: bool = False,
-              sessions: int = 1, push_to_start: bool = False, hold: int = 0):
+              sessions: int = 1, push_to_start: bool = False, hold: int = 0,
+              warmup: int = 0):
     """Drive a synthetic race through the real live path. See src/mockrace.py.
 
     Guarded by MXT_MOCK_KEY: unset, this 404s and the feature does not exist.
@@ -2528,8 +2529,13 @@ def mock_race(minutes: int = 12, key: str = "", stop: bool = False,
     # green flag — the shape of a weather hold. Renders the delayed card and
     # app state on a real phone; see the note on MAX_HOLD_S in mockrace.py for
     # why it tests the drawing and not the detection.
+    # warmup=N runs N seconds of QUALIFYING first — live, but not a session
+    # that earns a lock screen. That is the sequence that broke Columbus and
+    # the one no mock could reproduce: cards cleared during the morning, then
+    # the motos, and nothing relaunching.
     run = mockrace.start(minutes, sessions=sessions,
-                         push_to_start=push_to_start, hold_s=hold)
+                         push_to_start=push_to_start, hold_s=hold,
+                         warmup_s=warmup)
     # Don't make the caller wait out the idle sleep to see anything happen.
     _la_wake_now()
     return run
@@ -2555,6 +2561,10 @@ def live(demo: bool = False):
     _mock_event = {"event_id": mockrace.event_id(), "series": "SMX",
                    "venue": mockrace.VENUE, "city": "Columbus",
                    "state": "OH", "round_label": "System test",
+                   # The moment this run's racing starts. Without it the card
+                   # logic takes its no-start-time fallback and a mock can
+                   # never rehearse a morning with no cards.
+                   "start_time_utc": mockrace.gate_utc(),
                    "event_date": None, "start_time_et": None,
                    "broadcast": None, "track_map": None}
     mock = mockrace.timing()

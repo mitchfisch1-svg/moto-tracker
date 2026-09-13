@@ -21,6 +21,7 @@ every line that matters.
 Guarded by MXT_MOCK_KEY. Unset, the endpoint does not exist.
 """
 
+import datetime
 import math
 import os
 import random
@@ -75,6 +76,15 @@ DAY_DONE_S = 120
 # no test anybody will sit through.
 MAX_HOLD_S = 600          # a delay you can watch, not one you have to wait out
 
+# A session that does NOT earn a lock screen, run before the motos — the shape
+# of an SMX race morning. Every mock session so far has been a points race, so
+# the one sequence that actually broke Columbus could not be rehearsed: live
+# qualifying, cards cleared, then the motos and nothing relaunching. `warmup=N`
+# puts N seconds of qualifying in front, which `classify()` reads as
+# 'qualifying' exactly like the real thing.
+MAX_WARMUP_S = 600
+WARMUP_NAME = "250 Qualifying 1 (system test)"
+
 # Points for a main-event finish, so the end-of-day card carries the number a
 # result actually means rather than a blank column.
 _POINTS = [25, 22, 20, 18, 16, 15, 14, 13, 12, 11]
@@ -99,7 +109,8 @@ _FIELD = [
 
 
 def start(minutes: int, seed: int = 7, sessions: int = 1,
-          push_to_start: bool = False, hold_s: int = 0) -> dict:
+          push_to_start: bool = False, hold_s: int = 0,
+          warmup_s: int = 0) -> dict:
     """Begin a run of `sessions` back-to-back sessions. Returns its status.
 
     Each session is `minutes` long (two of them on the gate, the rest racing)
@@ -117,12 +128,16 @@ def start(minutes: int, seed: int = 7, sessions: int = 1,
     minutes = max(MIN_MINUTES, min(int(minutes), MAX_MINUTES))
     sessions = max(1, min(int(sessions), MAX_SESSIONS))
     hold_s = max(0, min(int(hold_s or 0), MAX_HOLD_S))
+    warmup_s = max(0, min(int(warmup_s or 0), MAX_WARMUP_S))
     with _lock:
-        racing = sessions * (minutes * 60 + hold_s + FINISH_S)
+        # racing_s is the offset at which racing ENDS, so the warm-up shifts
+        # everything after it and day_complete's window needs no change.
+        racing = warmup_s + sessions * (minutes * 60 + hold_s + FINISH_S)
         _run = {
             "started_at": time.time(),
             "session_s": minutes * 60,
             "hold_s": hold_s,
+            "warmup_s": warmup_s,
             "sessions": sessions,
             "racing_s": racing,
             # The run stays "running" through the day-complete phase on
@@ -157,13 +172,18 @@ def _phase(elapsed: float, run: dict):
     finishing order. Everything past the last one is over.
     """
     hold = run.get("hold_s", 0)
+    warm = run.get("warmup_s", 0)
     block = run["session_s"] + hold + FINISH_S
+    if elapsed < warm:
+        # Qualifying: live, but not a session that earns a lock screen.
+        return 0, elapsed, "warmup"
     if elapsed >= run["racing_s"]:
         # Racing is over for the day. Still "running" so the loop's window
         # stays open — see the note on duration_s in start().
         return run["sessions"] - 1, elapsed - run["racing_s"], "day_done"
-    idx = min(int(elapsed // block), run["sessions"] - 1)
-    within = elapsed - idx * block
+    rel = elapsed - warm
+    idx = min(int(rel // block), run["sessions"] - 1)
+    within = rel - idx * block
     if within < GATE_S:
         return idx, within, "staged"
     # The hold sits between the gate and the green flag: the grid is set and
@@ -256,6 +276,19 @@ def timing():
         run = dict(_run)
 
     idx, within, state = _phase(elapsed, run)
+    if state == "warmup":
+        # Genuinely live and genuinely not worth a lock screen — the state the
+        # real feed is in all of an SMX morning, and the one no mock could
+        # produce before. classify() reads this name as 'qualifying'.
+        return {
+            "race_name": WARMUP_NAME,
+            "race_state": "racing",
+            "riders": _order(within, run["seed"]),
+            "clock": {"remaining": max(0, int(run["warmup_s"] - within)),
+                      "flag": "green"},
+            "announcements": [],
+            "mock": True,
+        }
     if state == "day_done":
         # No session is on track. `/live` reports day_complete instead, which
         # is what builds the end-of-day card. See day_complete().
@@ -335,6 +368,23 @@ def day_complete():
             for i, r in enumerate(order)
         ]
     return out
+
+
+def gate_utc():
+    """When this run's RACING starts, as an ISO string, or None.
+
+    `/live` hands this out as the mock event's start_time_utc so the card
+    logic sees a real gate and behaves exactly as it would on race day. Without
+    it `_ready_to_launch` takes its "no start time, degrade toward launching"
+    fallback and the mock can never reproduce a morning with no cards — which
+    is the one sequence that broke Columbus.
+    """
+    with _lock:
+        if not _run:
+            return None
+        gate = _run["started_at"] + _run.get("warmup_s", 0)
+    return (datetime.datetime.fromtimestamp(gate, datetime.timezone.utc)
+            .isoformat())
 
 
 def event_id() -> int:
