@@ -1,9 +1,9 @@
 {
- "event_key": "MX-28-2026-08-29",
- "venue": "Ironman",
- "series": "MX",
- "round_label": "Round 28/MX Championship Round",
- "event_date": "2026-08-29",
+ "event_key": "SMX-1-2026-09-12",
+ "venue": "Historic Crew Stadium",
+ "series": "SMX",
+ "round_label": "Playoff 1",
+ "event_date": "2026-09-12",
  "video_url": "https://raw.githubusercontent.com/mitchfisch1-svg/moto-tracker/media/recap.mp4",
  "duration_seconds": 30.0
 }
