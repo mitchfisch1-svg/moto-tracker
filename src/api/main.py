@@ -413,6 +413,17 @@ _LA_MIN_GAP_S = 20
 _LA_STARTED: set = set()          # (event_id, token) launched by this process
 _LA_STARTED_LOCK = threading.Lock()
 
+# Events whose launch records we have torn up because the session on track does
+# not earn a lock screen. Clearing a card and launching one share a ledger, and
+# on 09-12 that ledger ran one way only: a card cleared during qualifying spent
+# that phone's single launch for the whole event, so when the motos finally
+# started nothing relaunched — and the cards people already had sat orphaned,
+# frozen on "on the gate", for the rest of the day.
+#
+# So clearing now RE-ARMS. This set keeps it to one disarm per quiet period
+# rather than a DELETE every ten seconds for the six hours of a race morning.
+_LA_DISARMED: set = set()
+
 # How close to the gate a card may be launched.
 #
 # iOS ends a Live Activity roughly EIGHT HOURS after it starts, whatever we do.
@@ -1018,6 +1029,10 @@ def _live_activity_loop():
             if apns_ready():
                 rows = query("SELECT token, kind FROM live_activity_tokens")
                 _LA_STATS["tokens"] = len(rows)
+                # Counted every cycle, because this is the number that tells
+                # you whether any card is reachable. See _la_health.
+                _LA_STATS["update_tokens"] = sum(
+                    1 for r in rows if r.get("kind") == "update")
                 if rows:
                     _cycle_started = time.time()
                     payload = live()
@@ -1027,6 +1042,8 @@ def _live_activity_loop():
                     # _ready_to_launch. Anything already up gets ended below.
                     cards_wanted = _ready_to_launch(payload.get("event"),
                                                     payload.get("timing"))
+                    _LA_STATS["cards_wanted"] = bool(
+                        payload.get("live") and cards_wanted)
                     if (payload.get("live") and payload.get("timing")
                             and cards_wanted):
                         state = _la_content_state(payload)
@@ -1059,6 +1076,10 @@ def _live_activity_loop():
                         # install — and the update pushes below, the ones
                         # keeping every EXISTING card live, carry on untouched.
                         ev_id = (payload.get("event") or {}).get("event_id")
+                        # Racing again: let a later quiet period disarm afresh,
+                        # so every block of racing gets its own card rather than
+                        # one disarm silencing the rest of the day.
+                        _LA_DISARMED.discard(ev_id)
                         to_start = set()
                         if ev_id and _ready_to_launch(payload.get("event"),
                                                       payload.get("timing")):
@@ -1179,13 +1200,32 @@ def _live_activity_loop():
                         # moto, reading as though a race were seconds away. So
                         # clear it. No card is the honest answer; qualifying is
                         # still there in the app for anyone who wants it.
-                        cleared = _la_end_activities(None, 0)
-                        if cleared:
-                            _LA_STATS["cleared_early"] = (
-                                _LA_STATS.get("cleared_early", 0) + cleared)
-                            log.info("live-activity: cleared %d card(s) — %r "
-                                     "does not earn a lock screen", cleared,
-                                     (payload.get("timing") or {}).get("race_name"))
+                        ev_id = (payload.get("event") or {}).get("event_id")
+                        if ev_id and ev_id not in _LA_DISARMED:
+                            cleared = _la_end_activities(None, 0)
+                            if cleared:
+                                _LA_STATS["cleared_early"] = (
+                                    _LA_STATS.get("cleared_early", 0) + cleared)
+                            # RE-ARM. Without this the clear above is permanent:
+                            # push-to-start fires once per phone per event, so a
+                            # card cleared here could never come back when the
+                            # racing started. That is what happened at Columbus.
+                            try:
+                                with _pool.connection() as conn:
+                                    conn.execute(
+                                        "DELETE FROM push_sent WHERE key LIKE %s",
+                                        (f"lastart:{ev_id}:%",))
+                                with _LA_STARTED_LOCK:
+                                    _LA_STARTED.difference_update(
+                                        {p for p in _LA_STARTED if p[0] == ev_id})
+                                _LA_DISARMED.add(ev_id)
+                                log.info(
+                                    "live-activity: cleared %d card(s) and "
+                                    "re-armed push-to-start — %r does not earn "
+                                    "a lock screen", cleared,
+                                    (payload.get("timing") or {}).get("race_name"))
+                            except Exception:
+                                log.exception("live-activity: re-arm failed")
                     elif not payload.get("live"):
                         # Racing's over. End every activity and forget the tokens
                         # (fresh ones register next race day).
@@ -1478,6 +1518,22 @@ def _la_health() -> dict:
         # is frozen on its last frame.
         "seconds_since_cycle": round(now - cyc, 1) if cyc else None,
         "tokens": _LA_STATS.get("tokens"),
+        # HOW MANY CARDS WE CAN ACTUALLY REACH. `tokens` counts both kinds, and
+        # start tokens outnumber update tokens roughly forty to one, so it stays
+        # reassuringly large while the number that matters is zero.
+        #
+        # Columbus 09-12 is the whole argument for this field. All day: pushes
+        # climbing, failed 0, tokens 38 — and every card on every phone frozen
+        # on "on the gate", because there were no UPDATE tokens and Apple
+        # accepts pushes to activities that no longer exist. This is the one
+        # number that would have said so at 10am instead of the next morning.
+        #
+        # Zero while a points race is on means NOBODY has a live card.
+        "update_tokens": _LA_STATS.get("update_tokens"),
+        # What the loop last decided about whether this session earns a lock
+        # screen, and off which race name. "cards_wanted false" during a moto is
+        # a bug; during qualifying it is the design.
+        "cards_wanted": _LA_STATS.get("cards_wanted"),
         "last_push_race": _LA_STATS.get("race"),
         "seconds_since_push": round(now - last, 1) if last else None,
         # How long one cycle spends scraping. If this approaches the push
