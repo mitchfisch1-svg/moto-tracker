@@ -1106,7 +1106,9 @@ def _live_activity_loop():
                         # Racing again: let a later quiet period disarm afresh,
                         # so every block of racing gets its own card rather than
                         # one disarm silencing the rest of the day.
-                        _LA_DISARMED.discard(ev_id)
+                        # Same key shape the clear branch disarms under, or a
+                        # mock (event_id 0) would disarm once and never re-arm.
+                        _LA_DISARMED.discard(ev_id or "no-event")
                         to_start = set()
                         # Only the mock may remote-launch now. See
                         # _PUSH_TO_START_FOR_REAL_EVENTS.
@@ -1233,7 +1235,15 @@ def _live_activity_loop():
                         # clear it. No card is the honest answer; qualifying is
                         # still there in the app for anyone who wants it.
                         ev_id = (payload.get("event") or {}).get("event_id")
-                        if ev_id and ev_id not in _LA_DISARMED:
+                        # Keyed on the event where there is one, but a missing
+                        # or ZERO event id must not skip the clear: a mock
+                        # without push-to-start reports event_id 0, `if ev_id`
+                        # read that as falsy, and the whole clear-and-re-arm
+                        # path was silently skipped in every mock that could
+                        # have tested it. Ending cards needs no event id — only
+                        # the re-arm below does.
+                        disarm_key = ev_id or "no-event"
+                        if disarm_key not in _LA_DISARMED:
                             cleared = _la_end_activities(None, 0)
                             if cleared:
                                 _LA_STATS["cleared_early"] = (
@@ -1243,14 +1253,16 @@ def _live_activity_loop():
                             # card cleared here could never come back when the
                             # racing started. That is what happened at Columbus.
                             try:
-                                with _pool.connection() as conn:
-                                    conn.execute(
-                                        "DELETE FROM push_sent WHERE key LIKE %s",
-                                        (f"lastart:{ev_id}:%",))
-                                with _LA_STARTED_LOCK:
-                                    _LA_STARTED.difference_update(
-                                        {p for p in _LA_STARTED if p[0] == ev_id})
-                                _LA_DISARMED.add(ev_id)
+                                if ev_id:
+                                    with _pool.connection() as conn:
+                                        conn.execute(
+                                            "DELETE FROM push_sent WHERE key LIKE %s",
+                                            (f"lastart:{ev_id}:%",))
+                                    with _LA_STARTED_LOCK:
+                                        _LA_STARTED.difference_update(
+                                            {p for p in _LA_STARTED
+                                             if p[0] == ev_id})
+                                _LA_DISARMED.add(disarm_key)
                                 log.info(
                                     "live-activity: cleared %d card(s) and "
                                     "re-armed push-to-start — %r does not earn "
@@ -2601,8 +2613,18 @@ def live(demo: bool = False):
                    "broadcast": None, "track_map": None}
     mock = mockrace.timing()
     if mock:
-        return {"live": True, "mock": True, "timing": mock,
-                "event": _mock_event}
+        out = {"live": True, "mock": True, "timing": mock,
+               "event": _mock_event}
+        # The card content, same as a real event gets. Without this a mock
+        # could not exercise the app-driven update() at all — the payload
+        # carried no card, the app had nothing to push into the activity, and
+        # a run would have "passed" while testing none of it.
+        if _ready_to_launch(_mock_event, mock):
+            try:
+                out["card"] = _la_content_state(out)
+            except Exception:
+                log.exception("mock: could not build the card state")
+        return out
     # Racing is over but the mock is still running: report the day as complete
     # and carry the per-class results out with it. This is the ONLY way to make
     # the loop build its end-of-day card without waiting for a real race day —
