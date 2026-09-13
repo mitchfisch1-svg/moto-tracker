@@ -436,6 +436,21 @@ _LA_STARTED_LOCK = threading.Lock()
 # rather than a DELETE every ten seconds for the six hours of a race morning.
 _LA_DISARMED: set = set()
 
+# Push-to-start is OFF for real events (09-13, Mitch's call).
+#
+# It is the most fragile link in the chain: a card launched onto a phone with
+# no app running must self-register an update token through a native callback,
+# and every later update depends on that one step. It demoed perfectly in every
+# mock and failed in production — Columbus ran all day with cards on lock
+# screens that the server could never reach, frozen on their launch frame,
+# while /health showed pushes climbing and zero failures.
+#
+# A card that appears when you open the app has never once failed. So that is
+# the path now. The mock event can still exercise this code on request, so the
+# machinery stays tested and can be switched back on when the delivery chain is
+# understood rather than hoped about.
+_PUSH_TO_START_FOR_REAL_EVENTS = False
+
 # How close to the gate a card may be launched.
 #
 # iOS ends a Live Activity roughly EIGHT HOURS after it starts, whatever we do.
@@ -1093,8 +1108,13 @@ def _live_activity_loop():
                         # one disarm silencing the rest of the day.
                         _LA_DISARMED.discard(ev_id)
                         to_start = set()
-                        if ev_id and _ready_to_launch(payload.get("event"),
-                                                      payload.get("timing")):
+                        # Only the mock may remote-launch now. See
+                        # _PUSH_TO_START_FOR_REAL_EVENTS.
+                        may_launch = (_PUSH_TO_START_FOR_REAL_EVENTS
+                                      or ev_id == mockrace.PUSH_TO_START_EVENT_ID)
+                        if (ev_id and may_launch
+                                and _ready_to_launch(payload.get("event"),
+                                                     payload.get("timing"))):
                             try:
                                 recorded = {r["key"] for r in query(
                                     "SELECT key FROM push_sent WHERE key LIKE %s",
@@ -2801,7 +2821,25 @@ def live(demo: bool = False):
     else:
         _DAY_DONE_AT.pop(ev.get("event_id"), None)
 
-    return {"live": True, "demo": is_demo, "event": ev, "timing": timing}
+    out = {"live": True, "demo": is_demo, "event": ev, "timing": timing}
+    # The lock-screen card's content, decided HERE, so the app can push it into
+    # a running activity itself.
+    #
+    # A Live Activity cannot fetch anything — it only changes when something
+    # updates it. That has always meant an APNs push, which is six links long
+    # and silently broke for a whole race day. But while the app is OPEN it can
+    # update the card directly, with no server, no Apple and no token. This is
+    # the content for it to use.
+    #
+    # Built by the same _la_content_state the push path uses, so the two can
+    # never drift into saying different things about the same race — the
+    # failure that made "Winner" and "Leader" disagree for a day.
+    if not is_demo and _ready_to_launch(ev, timing):
+        try:
+            out["card"] = _la_content_state(out)
+        except Exception:
+            log.exception("live: could not build the card state")
+    return out
 
 
 # --- session results (race-day program browser) -------------------------------
