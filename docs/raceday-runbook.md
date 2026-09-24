@@ -1,10 +1,10 @@
-# Race-day runbook — SMX Playoff Round 1
+# Race-day runbook — SMX World Championship Final
 
-**Sat Sep 12 2026 · Historic Crew Stadium, Columbus OH**
+**Sat Sep 26 2026 · Thunder Ridge Nature Arena, Ridgedale MO · TRIPLE POINTS**
 
-One ordered page, so race day is execution rather than improvisation. Everything
-here is drawn from what was actually measured 08-31 → 09-02; the reasoning lives
-in the handoff, this is just the sequence.
+One ordered page, so race day is execution rather than improvisation. The
+reasoning lives in the handoff; this is just the sequence. Rewritten 09-24 for
+the final — Columbus's version assumed push-to-start, which is now off.
 
 ```
 KEY  = $(grep "^MXT_MOCK_KEY=" .env | cut -d= -f2-)   (git-ignored .env ONLY — never write it here: this repo is public)
@@ -13,49 +13,51 @@ API  = https://moto-tracker-api.onrender.com
 
 ## The day's shape
 
-The published schedule, which is a **TWO-MOTO** programme, not a single main:
+The venue is on **Central** time; everything below is **ET**.
 
 | ET | what |
 |---|---|
-| **8:30 AM** | race window OPENS. The loop wakes; the app shows live timing from here |
-| 8:50 AM | Qualifying Practice (250, 450, SMX Next) |
-| 12:00 PM | 250 & 450 Wildcard Races |
-| 2:30 PM | Opening Ceremonies — this is the stored `start_time_utc` |
-| **3:00 PM** | **Gate** (countdown target) |
-| **3:06 PM** | **250 Moto 1** — 🔔 **lock-screen cards launch here**, see below |
-| 3:43 PM | 450 Moto 1 |
-| 4:27 PM | SMX Next Main Event |
-| 4:51 PM | 250 Moto 2 |
-| **5:29 PM** | **450 Moto 2** — the last race |
-| **8:30 PM** | race window CLOSES |
+| **Fri Sep 25** | practice on track — **the results site switches to the final today; adopt it by hand (section 2)** |
+| **12:30 PM** | race window OPENS (6 h before the stored start). The app shows live timing from here |
+| 1:00 PM | Race Day Live (Peacock) — qualifying runs through the afternoon |
+| 5:00 PM | Rig Riot |
+| 6:30 PM | Opening Ceremonies — this is the stored `start_time_utc` |
+| **7:00 PM** | **Gate** (countdown target) |
+| ~7:06 PM | **250 Moto 1** — 🔔 **lock-screen cards start here**, see below |
+| ~7:43 PM | 450 Moto 1 |
+| ~8:27 PM | SMX Next Main Event |
+| ~8:51 PM | 250 Moto 2 |
+| **~9:29 PM** | **450 Moto 2** — the last race, and the title decider |
+| 10:00 PM | Post-Race |
+| 3:30 AM Sun | race window CLOSES (9 h after the start) |
 
-🔔 **Cards launch at the FIRST POINTS RACE — 250 Moto 1 — not when the window
-opens.** For SMX the loop waits for a session that scores (`moto` or `main`);
-practice, qualifying and the wildcards don't count. SX and MX still launch at
-the window, which is when qualifying starts.
+⚠️ **The ~ times are ESTIMATES** — Columbus's gaps after its gate, applied to a
+7 PM gate. The series has only published the gate. Columbus and LA both ran
+this four-moto programme; the final has not said otherwise.
 
-Two reasons, both permanent if you get it wrong: iOS ends a Live Activity after
-~8 hours, so a card launched at 8:30 AM would die around 4:30 PM — **before
-both Moto 2s** — and each phone is launched once per event, so it would never
-come back. A card parked there all morning also just gets swiped, same result.
+🔔 **Cards appear only when someone opens MXT and taps Race Day** — push-to-start
+has been OFF for real events since 09-13. **Nobody gets a card without opening
+the app.** And the SMX rule still holds: a card is wanted from the **first points
+race** (250 Moto 1), not qualifying.
 
-Reading it off the feed rather than the clock means **a rain delay carries the
-launch with it**: if racing slips to 5 PM, so do the cards.
-- [ ] So on the day: `starts` should stay **0 all morning** and jump when 250 Moto 1 goes on track. Morning zero is correct, not a fault.
+⏳ **iOS ends a Live Activity 8 hours after it starts.** A card opened for
+qualifying at 1 PM dies around 9 PM — **during 450 Moto 2.** So:
+- **1.6.2 with OTA `01a0d386` or later** (Mitch's TestFlight phone): the app
+  waits for the motos by itself — it only starts a card once `/live` carries `card`.
+- **1.6.1** (the App Store build — everyone else): it starts a card the moment
+  Race Day is opened. **Tell people to open Race Day at 7 PM ET or later.**
+  Done 09-24 by text; worth a reminder Saturday afternoon.
 
 🏁 **The closing card should be the six-row 250 + 450 card**, built from the
-series' own published Overall (fixed 09-11, `4c2bca4`). Expect: class label on
-the first row of each block, three riders each, **points** down the right.
+series' own published Overall (`4c2bca4`). Class label on the first row of each
+block, three riders each, **points** down the right.
 
 - [ ] If only ONE class shows (three rows), that is correct-and-waiting: the site posts each class's Overall separately and the 450's lands minutes after the last moto. It fills in on the next push.
 - [ ] If it falls back to "450 Moto 2 · final", the Overall wasn't readable. Not a failure — that is the old behaviour, deliberately kept as the fallback.
 
-⏱️ **2½ hours of margin** between racing ending and the window closing. Only a
-delay past **8:30 PM** puts the teardown at risk — see *If it all goes long*.
-
 ---
 
-## 1 · Morning, before 10:30
+## 1 · Before the window opens (Saturday, by 12:30 PM)
 
 ```bash
 curl -s https://moto-tracker-api.onrender.com/health
@@ -76,69 +78,47 @@ python scripts/raceday_check.py
 python scripts/audit.py
 ```
 
-- [ ] **10/10 invariants hold**
+- [ ] **11/11 invariants hold** — including "SMX standings are the playoff table the series publishes"
 
-## 2 · Once the site switches to Columbus
+## 2 · FRIDAY: adopt the final once the site switches
 
-The results site serves last week's event until this one goes on track.
-
-✅ **COLUMBUS IS ALREADY ADOPTED** — done by hand Friday 09-11 (event 29 →
-`517544`, feed `7478`). Nothing to do for this round.
-
-⚠️ **Don't lean on the automation for future rounds.** `.github/workflows/adopt-round.yml`
-runs `adopt_round.py --write` every 15 minutes in theory, but GitHub's scheduler
-was firing hourly jobs every **5–6 hours** on 09-11 — so it may fire once, late.
-And **SMX runs a Friday programme**: the site switches a day before the stored
-start, which the script's −8h guard refuses. For SMX, adopt by hand as soon as
-the site switches:
+The results site serves Los Angeles until the final goes on track — and **SMX
+runs a Friday programme**, so it switches a day before the stored start. Event
+31 has **no results id and no feed id** until this is done. The automation's
+−8 h guard refuses a Friday switch, and GitHub's scheduler fires late, so adopt
+by hand:
 
 ```bash
-python scripts/adopt_round.py --write --any-day
+python scripts/adopt_round.py                    # dry run: read the venue it names
+python scripts/adopt_round.py --write --any-day  # only once it says Thunder Ridge
 ```
 
-— after reading the venue it names and confirming it's the right round.
+- [ ] It named **Thunder Ridge**, not Los Angeles, and wrote to **event 31**
+- [ ] **Keep the `run_results --smx-id …` line it prints at the end** — that is section 5½'s command
 
-- [ ] Confirm it landed: the [adopt-round workflow](https://github.com/mitchfisch1-svg/moto-tracker/actions/workflows/adopt-round.yml) has a green run whose log says **"written to event 29"**
+**Two guards make the write safe**, and both are tested: it refuses any round we
+have already closed (the homepage keeps serving the previous round for days), and
+without `--any-day` it refuses unless the event is actually racing.
 
-To check by hand, or if the workflow is failing:
-
-```bash
-python scripts/adopt_round.py          # dry run, prints what it would do
-python scripts/adopt_round.py --write  # commit it
-```
-
-**Two guards make the unattended write safe**, and both are tested:
-- it refuses any round we have **already closed** — the results homepage keeps
-  serving the previous round for days after it finishes;
-- it refuses to write unless the target event is **actually racing** (−8 h to
-  +9 h around its start), so an id we have simply never seen cannot be adopted
-  onto the wrong event. Override by hand with `--any-day`.
-
-**Why this is not optional.** Until that write happens the round has no results
-id and no Live Race Media id, so `/live` falls back to the most recently cached
-id — `ORDER BY event_date DESC`, which today is **Ironman's `7478`, an MX feed**.
-The fallback is documented as safe because the feed is series-wide, but it has
-never been exercised across a series boundary, and SMX is not MX. This was fixed
-by hand at RedBud, Southwick and Denver; the script is that dig, scripted. It
-**refuses to adopt a round we have already closed**, so it cannot publish
-Ironman under Columbus's name.
+**Why this is not optional.** Until it is adopted, `/live` falls back to the most
+recently cached feed id. The feed is series-wide (Columbus's own id was the same
+`7478` as Ironman's), so live timing works on the fallback — but the round has no
+results id, so nothing ingests and nothing retires it properly.
 
 ```bash
 curl -s "$API/live/sessions" | python -c "import sys,json;[print(x['label'],x['status']) for x in json.load(sys.stdin)['sessions']]"
 ```
 
-- [ ] It names **Columbus** sessions, not Ironman
+- [ ] It names **Thunder Ridge** sessions, not Los Angeles
 
-**Then ship the SMX session chips** — 5 minutes, no build, from real labels:
+**Optional: SMX "still to come" chips** — the app has MX and SX lists but none
+for SMX. Columbus and LA both published exactly `250 Moto #1`, `450 Moto #1`,
+`SMX Next Main Event`, `250 Moto #2`, `450 Moto #2`. If Friday's labels match,
+add an `else if (series === 'SMX')` branch to `upcomingSessions` (App.js) and
+`eas update`. **Do not guess ahead of the real labels** — phantom chips are the
+failure this was built to remove.
 
-1. Read the labels above
-2. Add an `else if (series === 'SMX')` branch to `upcomingSessions` (App.js, search for `function upcomingSessions` — around line 1496) listing them
-3. `eas update --branch main --message "SMX session chips"`
-4. Two app relaunches to pick it up
-
-⚠️ **Do not pre-guess the format.** Phantom chips for sessions that never run is the failure this whole month was spent removing.
-
-## 3 · From 10:30 AM, the loop is awake
+## 3 · From 12:30 PM, the loop is awake
 
 A healthy reading looks like this:
 
@@ -147,49 +127,31 @@ A healthy reading looks like this:
 "mock_race": {"running": false}
 "live_activity": {
   "seconds_since_cycle": 4.2      <= ~10s during a race. READ THIS FIRST.
-  "tokens": 40, "pushes": 1200, "skipped": 900, "failed": 0,
-  "starts": 40, "starts_failed": 0
+  "update_tokens": 3,             phones with a card the server can reach
+  "cards_wanted": true,           false until 250 Moto 1 — correct
+  "pushes": 240, "failed": 0,
+  "starts": 0                     push-to-start is OFF — 0 all day is correct
 }
 ```
 
 🚨 **`seconds_since_cycle` first, always.** Every other field is written once per
-cycle and never cleared, so they all survive the loop dying. A `tokens: 36,
-cycle_ms: 87` that was five hours stale once read exactly like a healthy loop.
+cycle and never cleared, so they all survive the loop dying.
+
+🚨 **`update_tokens` is the number that matters.** Columbus ran all day with
+`pushes` climbing, `failed: 0` and every card frozen — Apple accepts pushes to
+cards that no longer exist. **`update_tokens: 0` during a moto means nobody has
+a live card.** It only rises as people open Race Day.
 
 🚨 **Read `pushes` PER TOKEN, not per minute.** One push goes to each update
-token per round. One phone = 3/min. Forty phones = 120/min and that is fine.
-**The number that matters is `pushes ÷ tokens ÷ elapsed_minutes ≈ 3.**
+token per round: `pushes ÷ update_tokens ÷ elapsed_minutes ≈ 3` is healthy.
 
-## 4 · Around the first gate drop
+## 4 · Around the first gate drop (~7:00 PM)
 
-- [ ] `starts` stays **0 all morning**, then jumps to roughly the start-token count when **250 Moto 1** goes on track (~3:06 PM). That is push-to-start remote-launching cards onto closed apps. Verified 09-02, 09-07 and 09-11. **A zero at noon is correct.**
-- [ ] **After that it may keep ticking up by one at a time — that's healthy.** Since 09-11 (`45ade30`) push-to-start is per PHONE, so each person who installs during the race gets their own card on the next push (~20 s while racing, up to 2 min during a hold). **What would be wrong is `starts` climbing by the whole token count again** — that would mean cards stacking on phones that already have one. Verified it doesn't: 12+ cycles flat after the burst.
-
-🚨 **BEFORE RACE DAY: every phone should be on 1.6.1 AND have been opened once since updating.**
-
-**1.6.1 went live on the App Store 09-08.** Do this on each of the four installs
-in the days beforehand, not on race morning:
-
-1. Update to **1.6.1** from the App Store
-2. **Open MXT once** afterwards — any tab
-
-Step 2 is a precaution, not a proven requirement: a new binary registers its own
-push-to-start token when it first runs, and it is not established that the old
-build's token survives an update. If it does not, and the app never runs, that
-phone gets **no card at all**. Ten seconds removes the doubt.
-
-| the phone runs | on race day |
-|---|---|
-| **1.6.1 (build 82)** | **nothing.** The card adopts itself and tracks the day untouched. Proven twice on 09-07 with the phone never touched. |
-| **1.6.0 (build 80)** | **open MXT once** after push-to-start fires. Any tab — Standings is enough. |
-
-Check which one a phone is on: **Settings → the bottom line.**
-
-On 1.6.0 a remotely-launched card is **frozen on its launch frame until the app runs**. Verified 09-07: a card read "on the gate" for two full minutes while the race went green and finished, then came alive 12 seconds after the app was opened. Skip this on a 1.6.0 phone and it shows the gate all afternoon.
-
-⚠️ **Until 1.6.1 is released and everyone has updated, assume 1.6.0 and do the pass.**
-- [ ] `starts_failed` small or zero. A few `Unregistered` are dead tokens from old installs; the loop deletes them itself. **Non-zero `starts_failed` is not automatically bad** — check whether the tokens that failed were ones that should still exist.
-- [ ] The card drops "· on the gate" within ~10s of the flag. Measured 4–9s.
+- [ ] `cards_wanted` turns **true** when 250 Moto 1 goes on track (backstop: 8:00 PM, 90 min after the stored start). **False all afternoon is correct.**
+- [ ] Open **Race Day** on your own phone. Within ~5 s the card reads **250 Moto 1 · on the gate**, riders listed, gaps blank. `update_tokens` goes up by one.
+- [ ] The card drops "· on the gate" within ~5 s of the flag. **Measured 09-24: 3–4 s**, with the phone locked.
+- [ ] **Lock the phone and leave it.** Verified 09-24 on build 83: it kept updating while locked through the finish and ended on Final results.
+- [ ] `failed` stays near zero. A few `Unregistered` are dead tokens from old installs; the loop deletes them itself.
 
 ## 5 · While racing
 
@@ -234,17 +196,18 @@ python -m src.pipeline.run_results --smx-id <the final's results id>
 - [ ] Card becomes **`Final results`** — top three of 250 and 450, six rows, class labels, points
 - [ ] It **stays for an hour**, then dismisses itself. Persisting is correct, not a fault.
 - [ ] `update` tokens drop to 0 in the database — that is the teardown having run
+- [ ] **SMX standings show the champions** within ~5 min of the series publishing (`/standings?series=SMX`, off the official playoff table). Compare https://www.supermotocross.com/results/standings/smx/450/ — the hourly audit does this rider by rider.
 
 ## If it all goes long
 
-Only if racing runs past **8:30 PM ET** does the window close before the feed
-goes quiet. Then the loop sleeps without ending anything and every locked phone
-keeps a frozen card.
+The window closes at **3:30 AM ET**, six hours after the last moto should end,
+so a delay has to be enormous to matter. The limit that bites first is iOS's
+**8 hours per card**: a card started at 7 PM lasts until 3 AM, fine — but a card
+started for qualifying does not, which is why the app now waits for the motos.
 
-**Fix in the moment:** the server ends activities on the window's open→closed
-edge (`c45198f`), so it self-heals on the next pass. If it does not, the only
-manual clear is for each user to open the app — and only the Race Day tab
-triggers it on builds before 1.6.0.
+**If the window does close on a live feed:** the server ends activities on the
+window's open→closed edge (`c45198f`), so it self-heals on the next pass. If it
+does not, the manual clear is for each user to open the app.
 
 ## Emergency: shipping a fix mid-race
 
@@ -257,6 +220,12 @@ eas update --branch main --message "what you fixed"
 
 Two app relaunches to apply (`fallbackToCacheTimeout: 0` means launch never
 waits on the network). Verified working 09-01.
+
+⚠️ **An update reaches ONE app version** (`runtimeVersion` is the appVersion
+policy). The repo is at **1.6.2**, so `eas update` from it reaches only 1.6.2
+builds — Mitch's TestFlight phone. **Everyone else is on 1.6.1** and gets nothing
+unless the fix is also published from the 1.6.1 code. Weigh that before
+counting on an OTA to reach the audience.
 
 **Backend** — push to main, Render deploys, confirm `commit` **twice**.
 
