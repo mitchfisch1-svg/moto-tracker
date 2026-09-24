@@ -7,7 +7,7 @@ here is drawn from what was actually measured 08-31 → 09-02; the reasoning liv
 in the handoff, this is just the sequence.
 
 ```
-KEY  = mxt-mock-fb7b3cdf0c346eb3f5c6a67bfad2af6d   (also in .env, git-ignored)
+KEY  = $(grep "^MXT_MOCK_KEY=" .env | cut -d= -f2-)   (git-ignored .env ONLY — never write it here: this repo is public)
 API  = https://moto-tracker-api.onrender.com
 ```
 
