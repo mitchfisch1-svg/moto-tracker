@@ -8,6 +8,7 @@ them were logic errors - the logic was fine, and tested. They were data errors:
     A half-scored Overall pinned forever  a cache with no completeness gate
     "Will Canaguier Iii" in five places   a presentation change that never migrated
     SMX standings blank                   an official table fetched and discarded
+    SMX showed the seeding (820 vs 92)    the right site, the wrong official table
     "Can't reach MXT" on the home screen  an endpoint too slow for a widget
 
 A pure function cannot see any of that. These checks look at what the app is
@@ -30,6 +31,7 @@ import time
 
 import psycopg
 import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -38,7 +40,8 @@ load_dotenv(ROOT / ".env")
 
 from src.names import titlecase_name                    # noqa: E402
 from src.config import get_database_url  # noqa: E402
-from src.api.main import _overall_block_is_settled      # noqa: E402
+from src.api.main import (                               # noqa: E402
+    _SMX_PLAYOFF_POINTS, _name_key, _overall_block_is_settled)
 
 API = os.environ.get("MXT_API", "https://moto-tracker-api.onrender.com")
 UA = {"User-Agent": "MotoTracker-audit/1.0"}
@@ -196,6 +199,65 @@ def _event_page(cur, http):
     want = {"sessions": d.get("sessions"), "results": d.get("results"),
             "Overall": ev.get("overall"), "qualifying": ev.get("qualifying")}
     return [f"{venue}: no {k}" for k, v in want.items() if not v]
+
+
+@check("SMX standings are the playoff table the series publishes",
+       "the SMX tab showed the playoff SEEDING (Lawrence 820) while Prado "
+       "led the championship on 92")
+def _smx_is_the_playoffs(_cur, http):
+    # Checked against supermotocross.com's own page, not the provider table
+    # the API reads — two official surfaces agreeing is the point.
+    today = datetime.date.today()
+    if today.year not in _SMX_PLAYOFF_POINTS:
+        # The playoffs run in September. A season with no ids by then means
+        # the SMX tab has quietly gone back to serving the seeding.
+        return ([f"api/main.py _SMX_PLAYOFF_POINTS has no {today.year} "
+                 "playoff table ids"] if today.month >= 9 else [])
+    if not http:
+        return []
+    bad = []
+    for cls in ("450", "250"):
+        try:
+            page = requests.get(
+                f"https://www.supermotocross.com/results/standings/smx/{cls}/",
+                headers=UA, timeout=30)
+            page.raise_for_status()
+            served = requests.get(API + "/standings",
+                                  params={"series": "SMX", "class": cls},
+                                  headers=UA, timeout=90)
+            served.raise_for_status()
+        except Exception as e:
+            bad.append(f"{cls}: request failed: {type(e).__name__}")
+            continue
+        site = {}
+        for tr in BeautifulSoup(page.text, "html.parser").select(
+                "table.smx-results-table tr"):
+            pos, name, pts = (tr.select_one(".smx-col-pos"),
+                              tr.select_one(".smx-rider-name"),
+                              tr.select_one(".smx-col-points"))
+            if pos and name and pts:
+                site[_name_key(name.get_text())] = (
+                    pos.get_text(strip=True), pts.get_text(strip=True),
+                    name.get_text(strip=True))
+        if not site:
+            bad.append(f"{cls}: no table on supermotocross.com")
+            continue
+        ours = {_name_key(r["full_name"]): (str(r["position"]), str(r["points"]),
+                                            r["full_name"])
+                for r in served.json()}
+        for k in sorted(site.keys() | ours.keys()):
+            s, o = site.get(k), ours.get(k)
+            if s and o and s[:2] == o[:2]:
+                continue
+            if not o:
+                bad.append(f"{cls} {s[2]}: site P{s[0]} {s[1]} pts, we omit them")
+            elif not s:
+                bad.append(f"{cls} {o[2]}: we serve P{o[0]} {o[1]} pts, "
+                           "the site doesn't list them")
+            else:
+                bad.append(f"{cls} {s[2]}: site P{s[0]} {s[1]} pts, "
+                           f"we serve P{o[0]} {o[1]} pts")
+    return bad
 
 
 def main():

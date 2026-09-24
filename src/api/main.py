@@ -31,7 +31,7 @@ from psycopg_pool import ConnectionPool
 
 from ..sessions import classify
 from ..apns import apns_ready, send_live_activity
-from ..names import display_surname, titlecase_name
+from ..names import display_surname, fold, titlecase_name
 from ..config import get_database_url
 from ..notify import notify_work
 from .. import mockrace
@@ -1783,6 +1783,14 @@ def standings(
     if (klass or "").upper() == "WMX":
         return _wmx_standings()
     year = year or _current_year()
+    # SMX is the playoff championship, read off the official table: the
+    # `standings` table holds the seeding. See _SMX_PLAYOFF_POINTS.
+    if series.upper() == "SMX" and year in _SMX_PLAYOFF_POINTS:
+        try:
+            return _smx_standings(klass, year)
+        except Exception:
+            raise HTTPException(status_code=502,
+                                detail="results site unavailable")
     sql = """
         SELECT st.class, st.position, r.id AS rider_id, r.full_name, r.number,
                r.team, r.manufacturer,
@@ -2075,6 +2083,11 @@ def rider(rider_id: int):
         """,
         [rider_id],
     )
+    # SMX rows in `standings` are the playoff SEEDING, not the championship —
+    # swap them for this rider's line in the official playoff table.
+    if _current_year() in _SMX_PLAYOFF_POINTS:
+        standings_rows = ([r for r in standings_rows if r["series"] != "SMX"]
+                          + _smx_standing_lines(rider_id))
     # WMX points live on the series-points page, not in our standings table, so
     # a WMX rider would otherwise show no championship at all — and the app
     # gates its "Compare head-to-head" button on having one.
@@ -3245,19 +3258,18 @@ _ROUND_COL_RE = re.compile(r"^\d+:")
 _FINISH_RE = re.compile(r"^\d+(st|nd|rd|th)$", re.I)
 
 
-def _wmx_standings():
-    cached = _sessions_cache_get("wmx")
-    if cached is not None:
-        return cached
-    try:
-        resp = requests.get(_WMX_SERIES_URL, headers=_LRM_HEADERS, timeout=20)
-        resp.raise_for_status()
-    except requests.RequestException:
-        stored = _db_cache_get("wmx:standings")
-        if stored is not None:
-            return stored
-        raise HTTPException(status_code=502, detail="results site unavailable")
-    soup = BeautifulSoup(resp.text, "html.parser")
+def _parse_series_points(html: str, klass: str):
+    """(title, rows) off one of the provider's series-points pages.
+
+    WMX and the SMX playoffs publish the same layout: '# | BIKE | RIDER |
+    POINTS', sometimes POINT ADJUSTMENTS, then one cell per round. `rows` is
+    None when the page has no points table at all; `title` is the page's own
+    heading ("2026 SMX Playoffs 450 Championship"), so a caller can check it
+    was handed the table it asked for.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    heading = soup.find(["h1", "h2", "h3"])
+    title = heading.get_text(" ", strip=True) if heading else ""
 
     table = header = None
     for tb in soup.find_all("table"):
@@ -3270,7 +3282,7 @@ def _wmx_standings():
             table, header = tb, cells
             break
     if table is None:
-        raise HTTPException(status_code=404, detail="WMX standings not posted yet")
+        return title, None
 
     pts_i = header.index("POINTS")
     round_idx = [i for i, h in enumerate(header) if _ROUND_COL_RE.match(h)]
@@ -3288,7 +3300,7 @@ def _wmx_standings():
             if len(toks) >= 2 and _FINISH_RE.match(toks[1]):
                 finishes.append(toks[1].lower())
         rows.append({
-            "class": "WMX",
+            "class": klass,
             "position": int(cells[0]),
             "rider_id": None,
             "full_name": (cells[3] or "").strip(),
@@ -3303,6 +3315,24 @@ def _wmx_standings():
     leader = rows[0]["points"] if rows else 0
     for r in rows:
         r["gap"] = leader - r["points"]
+    return title, rows
+
+
+def _wmx_standings():
+    cached = _sessions_cache_get("wmx")
+    if cached is not None:
+        return cached
+    try:
+        resp = requests.get(_WMX_SERIES_URL, headers=_LRM_HEADERS, timeout=20)
+        resp.raise_for_status()
+    except requests.RequestException:
+        stored = _db_cache_get("wmx:standings")
+        if stored is not None:
+            return stored
+        raise HTTPException(status_code=502, detail="results site unavailable")
+    _title, rows = _parse_series_points(resp.text, "WMX")
+    if rows is None:
+        raise HTTPException(status_code=404, detail="WMX standings not posted yet")
 
     # Enrich with rider identities from our pipeline (WMX motos are ingested),
     # so matched rows get tap-through rider pages, team/manufacturer, and
@@ -3364,6 +3394,167 @@ def _wmx_standing_lines(rider_id: int) -> list[dict]:
         "points": row.get("points"), "wins": row.get("wins"),
         "podiums": row.get("podiums"), "gap": row.get("gap"),
     }]
+
+
+# --- SMX playoff standings ---------------------------------------------------
+# The SMX title is decided in the playoff rounds, on the provider's "SMX
+# Playoffs 450/250 Championship" tables. Its "SMX Combined Championship" tables
+# (ids 19/18) are something else: season-long SX + MX points that only SEED the
+# playoffs. apply_official_standings writes those into `standings`, so reading
+# SMX from there showed Hunter Lawrence leading on 820 while Jorge Prado led the
+# real championship on 92. So SMX, like WMX, is read off the published table
+# and never out of `standings` — and never recomputed: the playoff table carries
+# each rider's seeding bonus as a POINT ADJUSTMENT and scores its rounds on its
+# own scale (Los Angeles paid 50 for a win), none of which our results know.
+# Checked rider by rider against supermotocross.com/results/standings/smx/450/
+# and /250/ — identical, and scripts/audit.py keeps checking. Racer X is NOT a
+# usable cross-check: it disagrees on a handful of riders past 17th.
+# The ids are per season. Add next year's when its playoff tables appear; until
+# then SMX falls back to the `standings` table, i.e. the seeding.
+_SMX_PLAYOFF_POINTS = {2026: {"450": 30, "250": 31}}
+_SMX_TTL = 300
+_SMX_REFRESHING: set = set()
+_SMX_REFRESH_LOCK = threading.Lock()
+
+
+def _name_key(name) -> str:
+    """A name reduced to what two sources agree on: "R.J. Hampshire" and
+    "R J Hampshire" both become "rjhampshire", "Tøndel" becomes "tondel".
+    The same rule as adapters/official_standings.match_key, which the API may
+    not import."""
+    return re.sub(r"[^a-z0-9]", "", fold(name or ""))
+
+
+def _attach_riders(rows):
+    """Give each official row our rider's id, team, bike and headshot, so it
+    taps through to a rider page like any other standings row.
+
+    Names match the way apply_official_standings matches them. A key two
+    riders share is settled by race number or left unmatched, and one rider
+    never claims two rows: no rider page beats the wrong rider's page.
+    Best-effort — the official points serve regardless.
+    """
+    for r in rows:
+        r["hometown"] = None     # /rundown reads it off every leader
+    try:
+        riders = query(
+            """
+            SELECT id, full_name, number, team, manufacturer, hometown,
+                   COALESCE(headshot_override, headshot_racerx, headshot_url) AS headshot_url
+            FROM riders
+            """
+        )
+        aliases = query("SELECT rider_id, alias FROM rider_aliases")
+    except Exception as e:
+        log.warning("SMX standings served without rider links: %s", e)
+        return rows
+    by_key: dict[str, list] = {}
+    for m in riders:
+        by_key.setdefault(_name_key(m["full_name"]), []).append(m)
+    by_id = {m["id"]: m for m in riders}
+    for a in aliases:
+        k = _name_key(a["alias"])
+        if k and k not in by_key and a["rider_id"] in by_id:
+            by_key[k] = [by_id[a["rider_id"]]]
+    taken = set()
+    for r in rows:
+        k = _name_key(r["full_name"])
+        cands = (by_key.get(k) or []) if k else []
+        if len(cands) > 1:
+            cands = [m for m in cands
+                     if str(m["number"] or "") == str(r["number"] or "")]
+        m = cands[0] if len(cands) == 1 else None
+        if m is None or m["id"] in taken:
+            continue
+        taken.add(m["id"])
+        r.update(rider_id=m["id"], team=m["team"],
+                 manufacturer=m["manufacturer"],
+                 headshot_url=m["headshot_url"], hometown=m["hometown"])
+    return rows
+
+
+def _smx_fetch(year: int, cls: str):
+    """Scrape one class's playoff table and cache it. Raises on any failure."""
+    sid = _SMX_PLAYOFF_POINTS[year][cls]
+    resp = requests.get(f"{_RESULTS_HOME}?p=view_series_points&id={sid}",
+                        headers=_LRM_HEADERS, timeout=20)
+    resp.raise_for_status()
+    title, rows = _parse_series_points(resp.text, cls)
+    # Refuse anything that does not call itself this season's playoff table
+    # for this class. The ids are the provider's to reuse, and the wrong table
+    # served under the right heading is exactly the bug this replaced.
+    t = title.upper()
+    if (not rows or str(year) not in t or "PLAYOFF" not in t
+            or not re.search(rf"\b{cls}\b", t)):
+        raise ValueError(f"not the {year} SMX {cls} playoff table: {title!r}")
+    rows = _attach_riders(rows)
+    _SESSIONS_CACHE[f"smx:{year}:{cls}"] = (time.time() + _SMX_TTL, rows)
+    _db_cache_put(f"smx:standings:{year}:{cls}", rows)
+    return rows
+
+
+def _smx_refresh_behind(year: int, cls: str) -> None:
+    """Re-scrape one class on a background thread, one at a time per class."""
+    job = (year, cls)
+    with _SMX_REFRESH_LOCK:
+        if job in _SMX_REFRESHING:
+            return
+        _SMX_REFRESHING.add(job)
+
+    def run():
+        try:
+            _smx_fetch(year, cls)
+        except Exception as e:
+            log.warning("SMX %s standings refresh failed: %s", cls, e)
+        finally:
+            with _SMX_REFRESH_LOCK:
+                _SMX_REFRESHING.discard(job)
+
+    threading.Thread(target=run, name=f"smx-standings-{cls}",
+                     daemon=True).start()
+
+
+def _smx_class_rows(year: int, cls: str):
+    hit = _SESSIONS_CACHE.get(f"smx:{year}:{cls}")
+    if hit and hit[0] > time.time():
+        return hit[1]
+    # Past its TTL: serve what we have and refresh behind it. The home-screen
+    # widget reads this through /rundown and gets seconds to answer, and the
+    # results site is slowest on race night — exactly when these numbers move.
+    stale = hit[1] if hit else _db_cache_get(f"smx:standings:{year}:{cls}")
+    if stale is not None:
+        _smx_refresh_behind(year, cls)
+        return stale
+    return _smx_fetch(year, cls)   # nothing stored anywhere yet: scrape now
+
+
+def _smx_standings(klass: str | None = None, year: int | None = None):
+    """The SMX championship for one class, or both in the order /standings
+    has always returned them. [] for a class the playoffs don't run. Raises
+    only when there is nothing to serve at all."""
+    year = year or _current_year()
+    ids = _SMX_PLAYOFF_POINTS.get(year) or {}
+    out = []
+    for cls in ([klass] if klass else sorted(ids)):
+        if cls in ids:
+            out.extend(_smx_class_rows(year, cls))
+    return out
+
+
+def _smx_standing_lines(rider_id: int) -> list[dict]:
+    """This rider's SMX championship, shaped like a /riders/{id} standings
+    entry. A failed scrape means no SMX line — never the seeding standing in
+    for one."""
+    if not rider_id:
+        return []
+    try:
+        rows = _smx_standings()
+    except Exception:
+        return []
+    return [{"series": "SMX", "class": r["class"], "position": r["position"],
+             "points": r["points"], "wins": r["wins"],
+             "podiums": r["podiums"], "gap": r["gap"]}
+            for r in rows if r.get("rider_id") == rider_id]
 
 
 @app.get("/live/entries/{event_id}/{class_id}")
@@ -3715,21 +3906,28 @@ def rundown():
         for row in wr:
             last_winner.setdefault(row["class"], row["full_name"])
 
-    # Standings top-5 per class for the active series.
-    rows = query(
-        """
-        SELECT st.class, st.position, r.id AS rider_id, r.full_name, r.number,
-               r.manufacturer,
-               COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url,
-               r.hometown,
-               st.points, st.wins, st.podiums
-        FROM standings st JOIN seasons se ON se.id = st.season_id
-        JOIN series s ON s.id = se.series_id JOIN riders r ON r.id = st.rider_id
-        WHERE s.abbrev = %s AND se.year = %s AND st.position <= 5
-        ORDER BY st.class, st.position
-        """,
-        [active, year],
-    )
+    # Standings top-5 per class for the active series. SMX's come off the
+    # official playoff table — `standings` holds its seeding.
+    if active == "SMX" and year in _SMX_PLAYOFF_POINTS:
+        try:
+            rows = [r for r in _smx_standings(None, year) if r["position"] <= 5]
+        except Exception:
+            rows = []
+    else:
+        rows = query(
+            """
+            SELECT st.class, st.position, r.id AS rider_id, r.full_name, r.number,
+                   r.manufacturer,
+                   COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url,
+                   r.hometown,
+                   st.points, st.wins, st.podiums
+            FROM standings st JOIN seasons se ON se.id = st.season_id
+            JOIN series s ON s.id = se.series_id JOIN riders r ON r.id = st.rider_id
+            WHERE s.abbrev = %s AND se.year = %s AND st.position <= 5
+            ORDER BY st.class, st.position
+            """,
+            [active, year],
+        )
     by_class = {}
     for r in rows:
         by_class.setdefault(r["class"], []).append(r)
@@ -3900,18 +4098,29 @@ def recap():
                 "finishes": "-".join(str(f) for f in a["finishes"]),
             })
         # Championship top-3 after this round (SX 250 splits into East/West).
-        st = query(
-            """
-            SELECT st.class, st.position, r.full_name, st.points
-            FROM standings st
-            JOIN seasons se ON se.id = st.season_id
-            JOIN series  s  ON s.id  = se.series_id
-            JOIN riders  r  ON r.id  = st.rider_id
-            WHERE s.abbrev = %s AND st.class LIKE %s AND st.position <= 3
-            ORDER BY st.class, st.position
-            """,
-            [ev["series"], f"{cls}%"],
-        )
+        # SMX's is the official playoff table — `standings` holds its seeding.
+        smx_year = ev["event_date"].year if ev.get("event_date") else None
+        if ev["series"] == "SMX" and smx_year in _SMX_PLAYOFF_POINTS:
+            try:
+                st = [{"class": r["class"], "position": r["position"],
+                       "full_name": r["full_name"], "points": r["points"]}
+                      for r in _smx_standings(cls, smx_year)
+                      if r["position"] <= 3]
+            except Exception:
+                st = []
+        else:
+            st = query(
+                """
+                SELECT st.class, st.position, r.full_name, st.points
+                FROM standings st
+                JOIN seasons se ON se.id = st.season_id
+                JOIN series  s  ON s.id  = se.series_id
+                JOIN riders  r  ON r.id  = st.rider_id
+                WHERE s.abbrev = %s AND st.class LIKE %s AND st.position <= 3
+                ORDER BY st.class, st.position
+                """,
+                [ev["series"], f"{cls}%"],
+            )
         classes.append({"class": cls, "podium": podium, "standings_top3": st})
 
     return {"event": ev, "classes": classes}
@@ -4410,6 +4619,20 @@ def compare(
                 riders[rid].update(
                     position=row.get("position"), points=row.get("points"),
                     wins=row.get("wins"), podiums=row.get("podiums"))
+
+    # SMX: the rows just read are the playoff SEEDING. Overwrite them with the
+    # official playoff table — and a rider who isn't in it has no SMX line.
+    if series.upper() == "SMX" and year in _SMX_PLAYOFF_POINTS:
+        try:
+            smx = {r["rider_id"]: r for r in _smx_standings(klass, year)
+                   if r.get("rider_id")}
+        except Exception:
+            smx = {}
+        for rid in ids:
+            row = smx.get(rid) or {}
+            riders[rid].update(
+                position=row.get("position"), points=row.get("points"),
+                wins=row.get("wins"), podiums=row.get("podiums"))
 
     rows = query(
         """

@@ -206,13 +206,21 @@ On 1.6.0 a remotely-launched card is **frozen on its launch frame until the app 
 instead of ~89. **Transitions do NOT get slower** — they are bounded by the 10s
 loop interval, not the floor. Backend only, live in minutes.
 
-## 5½ · After the last main
+## 5½ · After the last moto
 
-- [ ] **Standings moved within an hour of the checkered.** Results ingest runs in
-  GitHub's `results.yml`, which is throttled (see section 2). If they haven't:
+- [ ] **SMX standings moved.** They are read straight off the official playoff
+  table (`/standings?series=SMX`, refreshed every 5 min) — no ingest involved,
+  so this says nothing about whether results landed. If they look stale, compare
+  https://www.supermotocross.com/results/standings/smx/450/ — if that hasn't
+  moved either, the series hasn't published yet.
+- [ ] **Re-ingest the round once Moto 2 is posted — every time, don't wait for a
+  symptom.** Los Angeles kept only Moto 1 for five days: `/live` retires a round
+  the moment its last race ends, and the catch-up only retries rounds with NO
+  results, so a round caught between motos is never revisited. Idempotent, and
+  it sends no stale podium pushes (those are gated on the race time):
 
 ```bash
-python -m src.pipeline.run_results --smx-id 517544
+python -m src.pipeline.run_results --smx-id <the final's results id>
 ```
 
 ## 6 · Between sessions

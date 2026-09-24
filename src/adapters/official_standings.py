@@ -41,7 +41,11 @@ CHAMPIONSHIPS = [
     ("SX", "450", 16),
     ("SX", "250 West", 14),
     ("SX", "250 East", 15),
-    # The SMX playoffs don't run until September; harmless until they do.
+    # ⚠️ NOT the SMX championship. 19/18 are the "SMX Combined Championship":
+    # season-long SX + MX points that only SEED the playoffs. The title is the
+    # "SMX Playoffs" tables (30/31 in 2026), which the API reads itself — see
+    # _SMX_PLAYOFF_POINTS in api/main.py. Anything that shows an SMX
+    # championship must go through the API, never through these rows.
     ("SMX", "450", 19),
     ("SMX", "250", 18),
 ]

@@ -3,7 +3,8 @@
 Frames are drawn with Pillow (720x1280 portrait, 24 fps) and stitched with the
 ffmpeg binary bundled by imageio-ffmpeg. Content: intro card, 450 podium,
 250 podium, championship top-3s, outro with the next race. All from our own
-database + the official rider headshots.
+database + the official rider headshots, except SMX's championship, which only
+the API has (see _smx_champ).
 
 Usage (from the project root, DATABASE_URL set):
     python scripts/render_recap_video.py --out recap_out [--force]
@@ -15,6 +16,7 @@ Skips rendering when the published recap.json already covers the latest event
 import argparse
 import io
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -47,6 +49,7 @@ MEDIA_JSON_URL = (
 VIDEO_URL = (
     "https://raw.githubusercontent.com/mitchfisch1-svg/moto-tracker/media/recap.mp4"
 )
+API = os.environ.get("MXT_API", "https://moto-tracker-api.onrender.com")
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -83,6 +86,22 @@ def ease(t):
 
 
 # --- data ---------------------------------------------------------------------
+def _smx_champ():
+    """SMX's top three from the API, which reads the official playoff table.
+
+    The `standings` table holds SMX's playoff SEEDING, which would put Hunter
+    Lawrence on 820 atop a title Jorge Prado was leading on 92. Raises rather
+    than render the recap without it: a failed run is retried by the Sunday
+    backup pass, a wrong video just sits in the app.
+    """
+    resp = requests.get(f"{API}/standings", params={"series": "SMX"},
+                        timeout=90)
+    resp.raise_for_status()
+    return [{"class": r["class"], "position": r["position"],
+             "full_name": r["full_name"], "points": r["points"]}
+            for r in resp.json() if r["position"] <= 3]
+
+
 def load_recap():
     """Latest completed event + per-class podiums + standings top3 + next race."""
     with get_connection() as conn:
@@ -122,20 +141,24 @@ def load_recap():
             )
             rows = cur.fetchall()
 
-            cur.execute(
-                """
-                SELECT st.class, st.position, r.full_name, st.points
-                FROM standings st
-                JOIN seasons se ON se.id = st.season_id
-                JOIN series  s  ON s.id  = se.series_id
-                JOIN riders  r  ON r.id  = st.rider_id
-                WHERE s.abbrev = %s AND st.position <= 3
-                ORDER BY st.class, st.position
-                """,
-                (series,),
-            )
-            champ = [{"class": c, "position": p, "full_name": n, "points": pts}
-                     for c, p, n, pts in cur.fetchall()]
+            if series == "SMX":
+                champ = _smx_champ()
+            else:
+                cur.execute(
+                    """
+                    SELECT st.class, st.position, r.full_name, st.points
+                    FROM standings st
+                    JOIN seasons se ON se.id = st.season_id
+                    JOIN series  s  ON s.id  = se.series_id
+                    JOIN riders  r  ON r.id  = st.rider_id
+                    WHERE s.abbrev = %s AND st.position <= 3
+                    ORDER BY st.class, st.position
+                    """,
+                    (series,),
+                )
+                champ = [{"class": c, "position": p, "full_name": n,
+                          "points": pts}
+                         for c, p, n, pts in cur.fetchall()]
 
             cur.execute(
                 """
