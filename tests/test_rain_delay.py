@@ -28,7 +28,6 @@ sys.path.insert(0, str(ROOT))
 from src.api.main import (  # noqa: E402
     _DELAY_WINDOW_POST_S,
     _DELAY_WINDOW_PRE_S,
-    _la_content_state,
     _racing_is_merely_paused,
 )
 
@@ -86,54 +85,3 @@ def test_the_window_is_the_one_the_constants_declare():
         ev(), now=GATE + datetime.timedelta(seconds=_DELAY_WINDOW_POST_S - 1))
     assert not _racing_is_merely_paused(
         ev(), now=GATE + datetime.timedelta(seconds=_DELAY_WINDOW_POST_S + 1))
-
-
-# --- what the lock screen says while it waits ---------------------------------
-
-def card(state, riders=None):
-    return _la_content_state({
-        "event": {"venue": "Historic Crew Stadium"},
-        "timing": {
-            "race_name": "450 Main Event",
-            "race_state": state,
-            "clock": {"remaining": 1200, "flag": "red"},
-            "riders": riders if riders is not None else [
-                {"position": 1, "name": "Jett Lawrence", "number": "18",
-                 "gap": None},
-                {"position": 2, "name": "Chase Sexton", "number": "1",
-                 "gap": "1.613"},
-            ],
-        },
-    })
-
-
-def test_a_delayed_card_says_delayed():
-    assert card("delayed")["race"].endswith("· delayed")
-
-
-def test_a_delayed_card_claims_no_gaps():
-    # The times the feed still holds belong to a session that has stopped.
-    # Claiming them describes racing that is not happening.
-    assert [r["g"] for r in card("delayed")["riders"]] == ["", ""]
-
-
-def test_a_delayed_card_does_not_say_leader_or_winner():
-    words = " ".join(r["g"] for r in card("delayed")["riders"])
-    assert "Leader" not in words and "Winner" not in words
-
-
-def test_a_delayed_card_shows_no_countdown():
-    # A clock that is not running must not appear to be running.
-    assert card("delayed")["remaining"] is None
-
-
-def test_the_riders_still_list_because_who_is_entered_is_real():
-    assert len(card("delayed")["riders"]) == 2
-
-
-def test_delayed_does_not_disturb_the_other_states():
-    assert card("staged")["race"].endswith("· on the gate")
-    assert card("finished")["race"].endswith("· final")
-    assert card("racing")["remaining"] == 1200
-    assert card("racing")["riders"][0]["g"] == "Leader"
-    assert card("finished")["riders"][0]["g"] == "Winner"

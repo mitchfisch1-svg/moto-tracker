@@ -51,11 +51,9 @@ def get(path):
 def check_health():
     print("\n== server ==")
     h = get("/health")
-    db, apns = h.get("db"), h.get("apns")
+    db = h.get("db")
     say(OK if h.get("status") == "ok" else BAD, f"status: {h.get('status')}")
     say(OK if db else BAD, f"database: {db}")
-    # No APNs credentials means no lock-screen card and no push, silently.
-    say(OK if apns else BAD, f"APNs (lock screen + push): {apns}")
 
 
 def check_live():

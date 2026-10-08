@@ -29,9 +29,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
-from ..sessions import classify
-from ..apns import apns_ready, send_live_activity
-from ..names import display_surname, fold, titlecase_name
+from ..names import fold, titlecase_name
 from ..config import get_database_url
 from ..notify import notify_work
 from .. import mockrace
@@ -366,959 +364,6 @@ def _notify_loop():
         time.sleep(_NOTIFY_INTERVAL_S if live_now else _NOTIFY_IDLE_INTERVAL_S)
 
 
-# Live Activity loop: while a race window is open, push the running order to
-# every registered lock-screen activity every ~10s. That's the practical
-# floor: the timing feed itself refreshes ~every 5-10s, and sustained faster
-# pushes risk Apple's frequent-update budget deferring deliveries (which
-# looks jerkier, not smoother). No-ops without APNs credentials or tokens.
-# How long a pushed card stays "current" before iOS greys it as outdated. This
-# is the safety net for a card we can't reach: an activity launched by
-# push-to-start onto a locked phone carries no update token until the app runs,
-# so if the owner never opens it we can neither refresh nor end it. At Unadilla
-# one sat on a lock screen reading "450 Moto #2 · on the gate" hours after the
-# program finished. Better a visibly stale card than a confidently wrong one.
-# How long a pushed frame stays believable before iOS greys it out.
-#
-# Was 900 — a card that stopped being driven went on looking confident and
-# current for a quarter of an hour. At Columbus they were frozen for HOURS and
-# every one of them read like live timing: "450 Moto #2 · on the gate" while
-# the race had been run. We could not keep them fed; the least we can do is
-# stop them pretending.
-#
-# Floor is the loop's own heartbeat (120 s): anything shorter and a perfectly
-# healthy card greys out between quiet-period pushes. 180 gives one heartbeat
-# of margin, so a card goes visibly stale within about three minutes of the
-# push chain actually breaking.
-_LA_STALE_S = 180
-# ...and once the day is done, how long the finishing order stays on the lock
-# screen before iOS clears it on its own.
-# AN HOUR (Mitch, 08-31): the result is the thing people waited all afternoon
-# for, and half an hour was gone before anyone who missed the finish came back
-# to it. iOS clears it without us, so nobody has to tidy up after a race.
-# (This constant used to read 1800 while the comment beside the code that uses
-# it said "an hour" — two comments in one file disagreeing about the same
-# number. Believe the constant, and keep the two in step.)
-_LA_RESULT_HOLD_S = 3600
-
-_LA_INTERVAL_S = 10
-# Never push more often than this, however fast the order churns. Apple budgets
-# Live Activity updates even with NSSupportsLiveActivitiesFrequentUpdates set,
-# and a race day is six motos plus qualifying — the budget is spent across the
-# whole afternoon, not per session.
-_LA_MIN_GAP_S = 20
-
-
-# Push-to-start, once per TOKEN rather than once per event.
-#
-# It used to be one `lastart:{event}` key: the first cycle pushed every start
-# token on file, marked the event done, and never pushed again. So anyone who
-# installed after the race window opened got no card sent to them — ever. For a
-# showcase weekend that is backwards: the people seeing a post about the app
-# install DURING the race, which is exactly who the once-per-event rule skipped.
-# Found 09-11, the night before Columbus.
-#
-# `_LA_STARTED` is a backstop, not the record. The record is `push_sent`. But if
-# the write that records a launch ever failed after the push succeeded, the next
-# cycle would launch that card AGAIN, every 10 seconds, stacking cards on one
-# lock screen. Remembering in-process what we pushed makes that impossible
-# short of a redeploy — and nothing deploys during a race.
-_LA_STARTED: set = set()          # (event_id, token) launched by this process
-_LA_STARTED_LOCK = threading.Lock()
-
-# Events whose launch records we have torn up because the session on track does
-# not earn a lock screen. Clearing a card and launching one share a ledger, and
-# on 09-12 that ledger ran one way only: a card cleared during qualifying spent
-# that phone's single launch for the whole event, so when the motos finally
-# started nothing relaunched — and the cards people already had sat orphaned,
-# frozen on "on the gate", for the rest of the day.
-#
-# So clearing now RE-ARMS. This set keeps it to one disarm per quiet period
-# rather than a DELETE every ten seconds for the six hours of a race morning.
-_LA_DISARMED: set = set()
-
-# Push-to-start is OFF for real events (09-13, Mitch's call).
-#
-# It is the most fragile link in the chain: a card launched onto a phone with
-# no app running must self-register an update token through a native callback,
-# and every later update depends on that one step. It demoed perfectly in every
-# mock and failed in production — Columbus ran all day with cards on lock
-# screens that the server could never reach, frozen on their launch frame,
-# while /health showed pushes climbing and zero failures.
-#
-# A card that appears when you open the app has never once failed. So that is
-# the path now. The mock event can still exercise this code on request, so the
-# machinery stays tested and can be switched back on when the delivery chain is
-# understood rather than hoped about.
-_PUSH_TO_START_FOR_REAL_EVENTS = False
-
-# How close to the gate a card may be launched.
-#
-# iOS ends a Live Activity roughly EIGHT HOURS after it starts, whatever we do.
-# The race window opens 6 h before the gate so the app can show qualifying, and
-# launching cards then burns most of that budget before the racing anyone cares
-# about. Columbus, 09-12, off the published schedule:
-#
-#   08:30  window opens, cards launch
-#   ~16:30 iOS ends them, eight hours later
-#   16:51  250 Moto 2      <- dead lock screen
-#   17:29  450 Moto 2      <- dead lock screen
-#
-# and push-to-start will not relaunch, because each phone is launched once per
-# event by design.
-#
-# The system limit is only half the reason. A card parked on a lock screen from
-# breakfast through qualifying gets SWIPED, and a swipe is permanent for the
-# same once-per-phone reason — somebody opts out of the feature at 10 am and has
-# nothing for the motos. Mitch's point, 09-11, and the better argument of the
-# two: showing it too early loses the card either way, by Apple's clock or by
-# the user's thumb.
-#
-# The rule is per SERIES, because the days are shaped differently (Mitch,
-# 09-11).
-#
-# SMX PLAYOFFS run a programme that is most of a working day — qualifying at
-# 08:50, wildcards at noon, and the racing that counts starting at 15:06. So
-# wait for the first POINTS race and launch then. Reading it off the feed
-# rather than the clock also means a rain delay carries the card with it:
-# racing slips to 17:00 and so does the launch, instead of the card sitting on
-# a lock screen through the hold burning its eight hours.
-#
-# SX and MX launch as soon as the window opens, which is when qualifying
-# starts — those days are shorter and qualifying is the draw.
-#
-# ⚠️ SX IN JANUARY IS NOT SAFE UNDER THIS RULE. A supercross day runs
-# qualifying early afternoon and mains until ~22:00, past eight hours from
-# qualifying, so cards would die during the mains exactly as they would have
-# here. Revisit before A1 — the fix is the same one used for SMX.
-_LA_SMX_BACKSTOP_S = 90 * 60      # launch anyway this long after the gate
-_POINTS_TYPES = ("moto", "main")
-
-
-def _event_start(ev):
-    """The event's start as an aware datetime, or None if it cannot be read."""
-    start = (ev or {}).get("start_time_utc")
-    if isinstance(start, str):
-        try:
-            start = datetime.datetime.fromisoformat(start)
-        except ValueError:
-            return None
-    if not isinstance(start, datetime.datetime):
-        return None
-    return start if start.tzinfo else start.replace(tzinfo=datetime.timezone.utc)
-
-
-def _is_points_race(timing) -> bool:
-    """Is what's on track a race that scores — a moto or a main?
-
-    Practice, qualifying and the SMX wildcards all return False, which is the
-    whole point: they are not what someone wants a lock-screen card for.
-    """
-    try:
-        return classify((timing or {}).get("race_name") or "")[1] in _POINTS_TYPES
-    except Exception:
-        return False
-
-
-def _widget_should_show_live(event, timing) -> bool:
-    """Should the home-screen standings widget show the running order?
-
-    Yes while something is on track — season points frozen at last week's total
-    are the wrong thing to stare at mid-moto.
-
-    EXCEPT for SMX, whose programme runs most of a working day: qualifying from
-    08:50 and wildcards at noon would occupy the widget for six hours before
-    the racing that counts. Mitch, 09-11, finding "250 Unseeded Qualifying 1"
-    on his home screen the night before Columbus — it should stay on the
-    championship until the motos are going. Same predicate as the lock-screen
-    card, so the two surfaces cannot disagree about what counts as racing.
-
-    SX and MX keep the old behaviour: shorter days, and their qualifying is
-    part of the draw.
-    """
-    if not timing:
-        return False
-    if (event or {}).get("series") == "SMX":
-        return _is_points_race(timing)
-    return True
-
-
-def _ready_to_launch(ev, timing=None, now=None) -> bool:
-    """Worth spending the Live Activity's eight hours on yet?
-
-    Degrades toward launching everywhere: an unreadable series, name or start
-    time gets a card, because too early beats never.
-    """
-    if (ev or {}).get("series") != "SMX":
-        return True                      # SX / MX: from the window opening
-    if _is_points_race(timing):
-        return True                      # the racing that counts is on track
-    start = _event_start(ev)
-    if start is None:
-        return True                      # cannot reason about it; old behaviour
-    # Backstop, so a feed that renames its sessions cannot mean nobody gets a
-    # card all day.
-    now = now or datetime.datetime.now(datetime.timezone.utc)
-    return now >= start + datetime.timedelta(seconds=_LA_SMX_BACKSTOP_S)
-
-
-def _lastart_key(ev_id, token) -> str:
-    return f"lastart:{ev_id}:{token}"
-
-
-def _tokens_to_start(rows, ev_id, recorded, in_process) -> set:
-    """Start tokens that have not had a card launched for this event yet.
-
-    `recorded` is the push_sent keys already written; `in_process` is the
-    (event_id, token) pairs this process has launched, recorded or not.
-    """
-    out = set()
-    for r in rows or []:
-        if not r or r.get("kind") != "start":
-            continue
-        tok = r.get("token")
-        if not tok:
-            continue
-        if _lastart_key(ev_id, tok) in recorded or (ev_id, tok) in in_process:
-            continue
-        out.add(tok)
-    return out
-
-
-def _la_change_key(state):
-    """The parts of a pushed state that mean something changed.
-
-    Everything EXCEPT the countdown. `remaining` ticks every second, so a
-    straight `state != last_state` was true on every single pass — which
-    silently defeated the budget guard it was being compared for and pushed
-    every 10s for a whole moto, ~180 times. Apple throttles that, and the lock
-    screen freezes: exactly what it was written to prevent.
-
-    The clock still goes OUT in the payload. It just no longer counts as news.
-    """
-    out = {k: v for k, v in (state or {}).items() if k != "remaining"}
-    # And not the third decimal of a gap either. "1.613" -> "1.647" is not news
-    # on a lock screen, but it differs on nearly every poll, so gaps alone kept
-    # the diff true almost as often as the clock did. Compare what a person
-    # would actually notice: the order, and the gap to a tenth. The full
-    # precision still goes out in the payload.
-    riders = out.get("riders")
-    if isinstance(riders, list):
-        out["riders"] = [
-            {**r, "g": _coarse_gap(r.get("g"))} if isinstance(r, dict) else r
-            for r in riders
-        ]
-    return out
-
-
-def _coarse_gap(g):
-    try:
-        return f"{float(g):.1f}"
-    except (TypeError, ValueError):
-        return g          # "Leader", "1 lap down", a best-lap time, or None
-# Off race day the loop just re-asks the (cached) race-window gate, so this
-# interval costs nothing but a wake-up from sleep.
-_LA_IDLE_INTERVAL_S = 300
-
-# Interruptible, so starting a mock does not mean waiting up to five minutes
-# for the loop to notice. That delay cost two partly-wasted test runs on 09-02:
-# the loop was asleep through a whole gate phase and green flag while someone
-# watched a placeholder card. Off race day the wait is unchanged; a real window
-# opens four hours before the gate, so nothing there depends on this.
-_LA_WAKE = threading.Event()
-
-
-def _la_wake_now() -> None:
-    """Cut the idle sleep short. Safe to call from any thread."""
-    _LA_WAKE.set()
-
-
-_LAPPED_RE = re.compile(r"^L\s*(\d+)$", re.I)
-
-
-def readable_gap(gap):
-    """Turn the timing feed's shorthand into something a person can read.
-
-    The provider writes a lapped rider's deficit as "L1" / "L2". The app has
-    always translated that; the widget and the lock screen never did, so the
-    home screen read "Hymas L1" where the app read "1 lap down". Cryptic on the
-    one surface you glance at without opening anything.
-    """
-    raw = (gap or "").strip()
-    m = _LAPPED_RE.match(raw)
-    if not m:
-        return raw
-    n = m.group(1)
-    return "1 lap down" if n == "1" else f"{n} laps down"
-
-
-def _la_content_state(payload):
-    t = payload.get("timing") or {}
-    state = t.get("race_state") or "racing"
-    # During qualifying the lock screen should show the same class-wide best-lap
-    # board the app and the broadcast show, not one group's running order.
-    # The value beside each rider means different things in the two kinds of
-    # session, and the SERVER decides which — the client just renders the
-    # string. It used to decide for itself, hardcoding "Leader" for P1, which
-    # threw away the one number a qualifying board exists to show: the lock
-    # screen read "Kitchen — Leader" while the broadcast read "Kitchen
-    # 1:56.283". Knowing he is fastest is not the same as knowing his time.
-    cq = t.get("combined_qualifying")
-    if cq:
-        # Qualifying is only about the lap. Everyone gets their time, P1
-        # included — exactly the board the broadcast puts on screen.
-        riders = [
-            {"p": r.get("position"), "n": display_surname(r.get("name")),
-             "num": str(r.get("number") or ""), "g": (r.get("best_lap") or "")[:12]}
-            for r in (cq.get("riders") or [])[:5]
-        ]
-    else:
-        # A race is about the gap, and there the leader IS the reference — his
-        # own elapsed time tells you nothing about the fight behind him.
-        #
-        # EXCEPT on the gate, where none of it has happened yet. A staged grid
-        # still carries positions — gate picks, or last session's order — and
-        # this used to render them as "Leader" and a set of gaps, describing a
-        # race nobody had started. Mitch spotted it on his own lock screen
-        # (09-01): "if they're on the gate they would have no times". Right.
-        # The column goes blank until the flag flies. Blank, not zeroes:
-        # "0.000" is a time, and claiming a time is the thing to avoid.
-        # A delay is the same story: the track is quiet, so there are no gaps to
-        # report. Whatever times the feed is still holding belong to a session
-        # that has stopped.
-        staged = state in ("staged", "delayed")
-        # And once the flag is out, P1 is not "Leader" — he WON. Leader is a
-        # present-tense word about a race still being run; leaving it on a
-        # finished board describes something that is no longer happening.
-        # Mitch, 09-02, watching a final card: "leader means while the race is
-        # going on". The gaps below stay as they are — those are the margins he
-        # won by, and they are still true.
-        first = "Winner" if state == "finished" else "Leader"
-        riders = [
-            {"p": r.get("position"), "n": display_surname(r.get("name")),
-             "num": str(r.get("number") or ""),
-             "g": ("" if staged
-                   else first if r.get("position") == 1
-                   else readable_gap(r.get("gap"))[:12])}
-            for r in (t.get("riders") or [])[:5]
-        ]
-    clock = t.get("clock") or {}
-    remaining = clock.get("remaining")
-    # The widget has no state field, so carry the status in the title it already
-    # renders — otherwise a staged grid reads as a race in progress and the card
-    # sits there looking live after the checkered.
-    name = (t.get("race_name") or "On track")
-    if state == "staged":
-        name = f"{name} · on the gate"
-    elif state == "delayed":
-        # Says what is true — racing is due and nothing is moving — without
-        # claiming a cause we cannot see from the feed.
-        name = f"{name} · delayed"
-    elif state == "finished":
-        name = f"{name} · final"
-    return {
-        "race": name[:40],
-        "venue": ((payload.get("event") or {}).get("venue") or "")[:28],
-        "riders": riders,
-        "flag": (clock.get("flag") or "")[:12],
-        # A staged grid has a full clock that isn't counting down yet — showing it
-        # made the lock screen look like a race was already running.
-        "remaining": (int(remaining)
-                      if state == "racing" and isinstance(remaining, (int, float))
-                      else None),
-    }
-
-
-def _la_final_state(payload):
-    """The card's closing frame: the last race's result, explicitly final.
-
-    Falls back to a plain "racing's done" card if the day-complete payload
-    somehow arrives without timing, so the activity always ends on something
-    coherent rather than whatever was frozen there.
-    """
-    timing = payload.get("timing")
-    if timing:
-        state = _la_content_state(payload)
-        # Build the label off the RAW race name, not the one _la_content_state
-        # already decorated — otherwise a session the feed still calls staged
-        # ends up reading "450 Moto #2 · on the gate · final".
-        raw = (timing.get("race_name") or "Racing")[:32]
-        state["race"] = f"{raw} · final"
-        state["remaining"] = None
-        return state
-    venue = (payload.get("event") or {}).get("venue") or ""
-    return {"race": "Racing complete", "venue": venue[:28],
-            "riders": [], "flag": None, "remaining": None}
-
-
-# The end-of-day card: both championship classes, not just whichever one
-# happened to race last. The last session of a programme is one class, so a
-# card built from it silently drops the other — you waited all afternoon and
-# the lock screen remembers half the day.
-_LA_OVERALL_CLASSES = ("250", "450")
-_LA_OVERALL_PER_CLASS = 3       # 3 + 3 = 6 rows; the widget renders 6 (was 5)
-
-
-def _la_overall_rows(by_class, per_class=_LA_OVERALL_PER_CLASS):
-    """Top N of each championship class, as lock-screen rows.
-
-    `cls` is set on the FIRST row of each class and blank on the rest, so the
-    card reads as two labelled blocks rather than six rows with the same word
-    repeated. The server decides that, not the widget — same rule as the
-    qualifying board, where the client just renders the string it is handed.
-
-    Classes are always emitted in _LA_OVERALL_CLASSES order so the card looks
-    identical at every round. A class with no result is skipped rather than
-    padded: three rows and a truth beats six rows and a guess.
-    """
-    rows = []
-    for klass in _LA_OVERALL_CLASSES:
-        entries = (by_class or {}).get(klass) or []
-        for i, e in enumerate(entries[:per_class]):
-            pts = e.get("points")
-            rows.append({
-                "p": e.get("position") or i + 1,
-                "n": display_surname(e.get("name")),
-                "num": str(e.get("number") or ""),
-                # An overall board has no gap to show. Points are what the
-                # result MEANS, especially in a playoff round.
-                "g": str(pts) if pts not in (None, "") else "",
-                "cls": klass if i == 0 else "",
-            })
-    return rows
-
-
-def _la_overall_state(event, by_class):
-    """The card to leave up once the whole programme is done, or None.
-
-    None means "not enough to say" — the caller falls back to the last race's
-    order, which is what shipped before this existed. Better the old card than
-    a confident half-empty one.
-    """
-    rows = _la_overall_rows(by_class)
-    if not rows:
-        return None
-    return {
-        "race": "Final results",
-        "venue": ((event or {}).get("venue") or "")[:28],
-        "riders": rows,
-        "flag": None,
-        "remaining": None,
-    }
-
-
-_OVERALL_PTS_RE = re.compile(r"(\d+)")
-
-
-def _overall_points(row):
-    """The points out of an Overall row's "50 pts", or None."""
-    m = _OVERALL_PTS_RE.search(str((row or {}).get("secondary") or ""))
-    return int(m.group(1)) if m else None
-
-
-def _overall_blocks_to_by_class(blocks):
-    """Round Overalls -> the shape the end-of-day card reads.
-
-    Only SETTLED boards count. The results site publishes a class's Overall as
-    soon as moto 1 is scored, with moto 2 as dashes, and it looks identical to
-    the finished thing — that is what `_overall_block_is_settled` exists for,
-    and showing a half-round as the day's result is the exact failure this card
-    was built to fix.
-
-    Nothing is computed here. The series publishes the combined table with each
-    rider's two finishes and the points they add up to; adding motos up
-    ourselves is what mis-scored championships all season.
-    """
-    out = {}
-    for b in blocks or []:
-        if not b or not _overall_block_is_settled(b):
-            continue
-        klass = classify((b.get("label") or ""))[0]
-        if klass not in _LA_OVERALL_CLASSES:
-            continue
-        rows = []
-        for r in b.get("rows") or []:
-            if r.get("position") is None:
-                continue
-            rows.append({"position": r.get("position"), "name": r.get("name"),
-                         "number": r.get("number"),
-                         "points": _overall_points(r)})
-        if rows:
-            out[klass] = rows
-    return out
-
-
-def _la_has_championship_classes(by_class) -> bool:
-    """Does this hold a result for a class the card actually shows?"""
-    return any((by_class or {}).get(k) for k in _LA_OVERALL_CLASSES)
-
-
-def _la_day_results_from_overalls(event_id):
-    """The day's result for a round that settles on MOTOS, not a main.
-
-    SMX playoffs and MX both run two motos a class, so `_la_day_results` — which
-    reads sessions typed `main` — finds nothing for 250/450 and the card fell
-    back to the last race's order. On 09-12 that would have been "450 Moto 2 ·
-    final": a real result, but one moto of one class standing in for the day.
-
-    Fails to None on anything at all, and the caller keeps the old fallback.
-    """
-    try:
-        rows = query("SELECT source_url, status FROM events WHERE id = %s",
-                     (event_id,))
-        if not rows:
-            return None
-        blocks = _event_overall(rows[0].get("source_url"),
-                                event_status=rows[0].get("status"),
-                                expected_classes=len(_LA_OVERALL_CLASSES))
-        return _overall_blocks_to_by_class(blocks) or None
-    except Exception:
-        log.exception("live-activity: could not read the round overall")
-        return None
-
-
-def _la_day_results(event_id):
-    """Each championship class's decisive result, from the database.
-
-    SX and SMX settle on one `main` per class, so the main IS the day's result
-    and this is a straight read. MX is different — two motos and a scraped
-    round Overall — and is deliberately NOT handled here: it returns nothing
-    for a moto-only round and the caller falls back to the last race's order.
-    Guessing an MX overall by summing moto points is exactly the kind of
-    recomputation that mis-scored every championship this season; when MX comes
-    back in May, feed this the settled Overall blocks instead (see
-    `_overall_is_settled`), do not compute it here.
-
-    Reads the database rather than the live feed on purpose: the results
-    ingest runs every 3 minutes while an event is live, so by day-complete the
-    rows are already there, and they survive a process restart.
-    """
-    try:
-        rows = query(
-            """
-            SELECT ss.class AS klass, r.position, r.points,
-                   ri.full_name AS name, ri.number
-            FROM sessions ss
-            JOIN results r  ON r.session_id = ss.id
-            JOIN riders  ri ON ri.id = r.rider_id
-            WHERE ss.event_id = %s AND ss.type = 'main'
-              AND r.position IS NOT NULL
-            ORDER BY ss.class, r.position
-            """,
-            (event_id,),
-        )
-    except Exception:
-        log.exception("live-activity: could not read day results")
-        return {}
-    out: dict = {}
-    for r in rows:
-        out.setdefault(r["klass"], []).append(dict(r))
-    return out
-
-
-_LA_SESSION_DONE = {"race": "Session complete", "venue": None,
-                    "riders": [], "flag": None, "remaining": None}
-
-
-def _la_end_activities(final, hold) -> int:
-    """End every 'update' activity and forget its token. Returns how many.
-
-    Split out of the loop because it now has TWO callers. The original one is
-    the feed going not-live while the race window is still open — the normal
-    end of a race day. The second is the window itself CLOSING, which used to
-    end nothing at all.
-
-    That second path is the orphaned-card bug (08-31). `window_open` is checked
-    before the payload, so once the window shut the loop slept and never reached
-    the end branch below. The card just stayed on the lock screen. The app has
-    its own `LiveActivity.end()`, but it lives in the Race Day tab's component
-    and the app opens on Standings — so on a locked phone NOTHING cleared it.
-    Verified the hard way: a finished mock sat on Mitch's lock screen reading
-    "0:09, Beaumer P1" until he swiped it away by hand.
-    """
-    import httpx
-    try:
-        rows = query(
-            "SELECT token FROM live_activity_tokens WHERE kind = 'update'")
-    except Exception:
-        log.exception("live-activity: could not read tokens to end")
-        return 0
-    upd = [r["token"] for r in rows]
-    if not upd:
-        return 0
-    with httpx.Client(http2=True, timeout=15) as client:
-        for t in upd:
-            send_live_activity(t, "end", final, client=client,
-                               dismiss_after_s=hold)
-    with _pool.connection() as conn:
-        conn.execute("DELETE FROM live_activity_tokens "
-                     "WHERE token = ANY(%s)", (upd,))
-    return len(upd)
-
-
-def _la_should_end_now(was_open, window_open, window_known) -> bool:
-    """Whether this pass should tear the activities down.
-
-    ONLY on a confirmed open -> closed transition. The window check is wrapped
-    in a bare `except` that falls back to False, so without the `window_known`
-    guard a transient database blip mid-race would read as "the window closed"
-    and end every card on every phone in the middle of a moto. That is a far
-    worse failure than the stale card the teardown exists to prevent: a stale
-    card recovers on the next push, an ended one is gone for good.
-
-    Not knowing is not the same as knowing it is shut.
-    """
-    return bool(was_open and window_known and not window_open)
-
-
-def _la_closing_frame(last_pushed):
-    """The card to leave behind, built from the last thing we actually sent.
-
-    When the window closes we have no fresh payload to build a result from —
-    but we still hold the last state that went out, and that IS the finishing
-    order. Leaving it up labelled "· final" beats blanking it: the result is
-    what people waited all afternoon for. Falls back to a plain done-card if we
-    never pushed anything (nothing to show, so show nothing and dismiss).
-    """
-    if not last_pushed:
-        return _LA_SESSION_DONE, 0
-    final = dict(last_pushed)
-    raw = (final.get("race") or "Racing").split(" · ")[0][:32]
-    final["race"] = f"{raw} · final"
-    final["remaining"] = None
-    # This frame is built from a state captured mid-race, so P1 still reads
-    # "Leader". The card is about to say "final" — relabel him to match, or it
-    # contradicts itself in two places at once. Copied rather than mutated:
-    # `last_pushed` is the loop's own record of what it sent.
-    final["riders"] = [
-        {**r, "g": "Winner"} if isinstance(r, dict) and r.get("g") == "Leader" else r
-        for r in (final.get("riders") or [])
-    ]
-    return final, _LA_RESULT_HOLD_S
-
-
-def _live_activity_loop():
-    import httpx
-    last_state = None
-    last_pushed = None      # the last content state actually sent, for the
-                            # closing frame when the window shuts
-    last_push = 0.0
-    was_open = False
-    while True:
-        # Stamped every pass, before anything that can fail or sleep. Without
-        # it `/health` could not tell a running loop from a dead one: `tokens`,
-        # `cycle_ms` and `live_call_ms` are written once per cycle and never
-        # cleared, so a five-hour-old fossil read exactly like a healthy loop.
-        # If this thread dies, THIS is the field that says so.
-        _LA_STATS["last_cycle_at"] = time.time()
-        # There is nothing to put on a lock screen when no race is running, so
-        # don't touch the database at all. This loop ticked every 10s around the
-        # clock — ~8,600 queries a day — which on its own was enough to keep the
-        # compute from ever idling out. See docs/db-budget.md.
-        #
-        # Guarded because this call sits outside the body's own handler: if it
-        # ever raised, the thread died and every lock screen froze on whatever
-        # frame it last received, until a redeploy. That is indistinguishable
-        # from the stale-card bug this loop exists to prevent.
-        try:
-            window_open = bool(mockrace.status().get("running")) or                 _race_window_open()
-            window_known = True
-        except Exception:
-            log.exception("live-activity: race-window check failed")
-            window_open = window_known = False
-        if not window_open:
-            # The window closing is an EVENT, and it used to be silent. If we
-            # were open a moment ago there may be live cards out there with no
-            # other way to be cleared — the app only ends them from a tab the
-            # user has to navigate to. Spend one pass ending them properly,
-            # leaving the finishing order up for an hour, THEN go to sleep.
-            # `was_open` is deliberately NOT cleared when the check merely
-            # failed — so once it recovers and genuinely reports closed, the
-            # teardown still happens instead of having been swallowed.
-            if _la_should_end_now(was_open, window_open, window_known):
-                was_open = False
-                final, hold = _la_closing_frame(last_pushed)
-                last_state = last_pushed = None
-                try:
-                    ended = _la_end_activities(final, hold)
-                    if ended:
-                        log.info("live-activity: window closed, ended %d "
-                                 "activities", ended)
-                except Exception:
-                    log.exception("live-activity: end-on-window-close failed")
-            # Sleeps the full interval unless something wakes us — starting a
-            # mock does. Returns immediately if the flag is already set, so a
-            # start that lands mid-check is not lost.
-            _LA_WAKE.wait(_LA_IDLE_INTERVAL_S)
-            _LA_WAKE.clear()
-            continue
-        was_open = True
-        try:
-            if apns_ready():
-                rows = query("SELECT token, kind FROM live_activity_tokens")
-                _LA_STATS["tokens"] = len(rows)
-                # Counted every cycle, because this is the number that tells
-                # you whether any card is reachable. See _la_health.
-                _LA_STATS["update_tokens"] = sum(
-                    1 for r in rows if r.get("kind") == "update")
-                if rows:
-                    _cycle_started = time.time()
-                    payload = live()
-                    _LA_STATS["live_ms"] = int((time.time() - _cycle_started) * 1000)
-                    # A live session does not automatically earn a lock screen.
-                    # For SMX, qualifying and the wildcards do not — see
-                    # _ready_to_launch. Anything already up gets ended below.
-                    cards_wanted = _ready_to_launch(payload.get("event"),
-                                                    payload.get("timing"))
-                    _LA_STATS["cards_wanted"] = bool(
-                        payload.get("live") and cards_wanted)
-                    if (payload.get("live") and payload.get("timing")
-                            and cards_wanted):
-                        state = _la_content_state(payload)
-                        # iOS budgets frequent Live Activity updates and silently
-                        # starts dropping them once you blow through it — which is
-                        # how the lock screen ended up frozen mid-session. Only
-                        # spend budget when something actually changed (with a
-                        # heartbeat so a quiet session can't look abandoned).
-                        key = _la_change_key(state)
-                        changed = key != last_state
-                        since = time.time() - last_push
-                        # Something worth sending, but not yet — or nothing
-                        # worth sending and the heartbeat is not due.
-                        if (changed and since < _LA_MIN_GAP_S) or                            (not changed and since < 120):
-                            _LA_STATS["skipped"] = _LA_STATS.get("skipped", 0) + 1
-                            time.sleep(_LA_INTERVAL_S)
-                            continue
-                        last_state = key
-                        stale = []
-                        # Remotely launch the activity on every phone with a
-                        # push-to-start token (iOS 17.2+) that has not had one
-                        # launched for this event — lock screens light up
-                        # without the app being opened, INCLUDING for someone
-                        # who installed an hour into the race. See
-                        # _tokens_to_start.
-                        #
-                        # Isolated in its own guard on purpose. If picking the
-                        # tokens fails, the answer is "launch nobody this
-                        # cycle" — which is today's behaviour for a late
-                        # install — and the update pushes below, the ones
-                        # keeping every EXISTING card live, carry on untouched.
-                        ev_id = (payload.get("event") or {}).get("event_id")
-                        # Racing again: let a later quiet period disarm afresh,
-                        # so every block of racing gets its own card rather than
-                        # one disarm silencing the rest of the day.
-                        # Same key shape the clear branch disarms under, or a
-                        # mock (event_id 0) would disarm once and never re-arm.
-                        _LA_DISARMED.discard(ev_id or "no-event")
-                        to_start = set()
-                        # Only the mock may remote-launch now. See
-                        # _PUSH_TO_START_FOR_REAL_EVENTS.
-                        may_launch = (_PUSH_TO_START_FOR_REAL_EVENTS
-                                      or ev_id == mockrace.PUSH_TO_START_EVENT_ID)
-                        if (ev_id and may_launch
-                                and _ready_to_launch(payload.get("event"),
-                                                     payload.get("timing"))):
-                            try:
-                                recorded = {r["key"] for r in query(
-                                    "SELECT key FROM push_sent WHERE key LIKE %s",
-                                    (f"lastart:{ev_id}:%",))}
-                                with _LA_STARTED_LOCK:
-                                    in_process = set(_LA_STARTED)
-                                to_start = _tokens_to_start(
-                                    rows, ev_id, recorded, in_process)
-                            except Exception:
-                                log.exception("live-activity: start lookup failed")
-                                to_start = set()
-                        # Claim them BEFORE pushing, so even a crash between the
-                        # push and the database write cannot launch a second
-                        # card on the next cycle.
-                        if to_start:
-                            with _LA_STARTED_LOCK:
-                                _LA_STARTED.update((ev_id, t) for t in to_start)
-                        sent = failed = 0
-                        with httpx.Client(http2=True, timeout=15) as client:
-                            for row in rows:
-                                if row["kind"] == "start" and row["token"] in to_start:
-                                    # Read the OUTCOME. This return value used
-                                    # to be discarded, with two consequences,
-                                    # both found on 09-02 by asking why 35
-                                    # start tokens existed for 4 installs:
-                                    #
-                                    # 1. A dead start token was never detected,
-                                    #    so it was never deleted. They pile up
-                                    #    forever — the same few phones
-                                    #    re-registering over weeks.
-                                    # 2. Push-to-start failure was INVISIBLE.
-                                    #    Nothing counted it, nothing logged it.
-                                    #    That is the one path no mock can
-                                    #    exercise, so race day is the first
-                                    #    time it ever runs — and it could fail
-                                    #    for every phone while /health showed a
-                                    #    clean board.
-                                    #
-                                    # Same lesson as b541256, one layer out:
-                                    # count what LANDED, not what was attempted.
-                                    # Kept in its own counters so it cannot
-                                    # distort the per-minute push rate, which
-                                    # is read against a floor of ~3.
-                                    ok, reason = send_live_activity(
-                                        row["token"], "start", state, client=client,
-                                        stale_after_s=_LA_STALE_S)
-                                    _LA_STATS["starts"] = (
-                                        _LA_STATS.get("starts", 0) + (1 if ok else 0))
-                                    if not ok:
-                                        _LA_STATS["starts_failed"] = (
-                                            _LA_STATS.get("starts_failed", 0) + 1)
-                                        _LA_STATS["last_start_error"] = reason
-                                    if reason in ("BadDeviceToken", "Unregistered",
-                                                  "ExpiredToken"):
-                                        stale.append(row["token"])
-                                if row["kind"] != "update":
-                                    continue
-                                ok, reason = send_live_activity(
-                                    row["token"], "update", state, client=client,
-                                    stale_after_s=_LA_STALE_S)
-                                # Record the OUTCOME, not just the attempt.
-                                # last_push_at was being stamped before any of
-                                # this ran, so a key Apple rejects every single
-                                # time would still read as a healthy loop —
-                                # "pushing fine" while nothing reaches a phone.
-                                if ok:
-                                    sent += 1
-                                else:
-                                    failed += 1
-                                    _LA_STATS["last_error"] = reason
-                                if reason in ("BadDeviceToken", "Unregistered",
-                                              "ExpiredToken"):
-                                    stale.append(row["token"])
-                        # Record each launch, one row per token. A failure here
-                        # is survivable: _LA_STARTED already stops a repeat in
-                        # this process, so the worst case is re-launching after
-                        # a redeploy — and nothing deploys during a race.
-                        if to_start:
-                            try:
-                                with _pool.connection() as conn:
-                                    for t in to_start:
-                                        conn.execute(
-                                            "INSERT INTO push_sent (key) VALUES (%s) "
-                                            "ON CONFLICT (key) DO NOTHING",
-                                            (_lastart_key(ev_id, t),))
-                            except Exception:
-                                log.exception("live-activity: start record failed")
-                        if stale:
-                            with _pool.connection() as conn:
-                                conn.execute(
-                                    "DELETE FROM live_activity_tokens "
-                                    "WHERE token = ANY(%s)", (stale,))
-                        # Only a push that actually landed counts as the last
-                        # one. A failed round now retries on the next tick
-                        # instead of being suppressed until the order moves.
-                        now_s = time.time()
-                        _LA_STATS.update(
-                            race=state.get("race"),
-                            pushes=_LA_STATS.get("pushes", 0) + sent,
-                            failed=_LA_STATS.get("failed", 0) + failed,
-                            cycle_ms=int((now_s - _cycle_started) * 1000))
-                        if sent:
-                            last_push = now_s
-                            last_pushed = state
-                            _LA_STATS["last_push_at"] = last_push
-                    elif payload.get("live") and payload.get("timing"):
-                        # Live, but not a session that earns a lock screen:
-                        # SMX qualifying and the wildcards.
-                        #
-                        # Not launching one is not enough. The APP starts a card
-                        # whenever anyone opens the Race Day tab, and the server
-                        # then keeps it fed — which on 09-12 left "250 Unseeded
-                        # Qualifying 1 · on the gate" sitting on a lock screen
-                        # through a torrential rain delay, five hours before a
-                        # moto, reading as though a race were seconds away. So
-                        # clear it. No card is the honest answer; qualifying is
-                        # still there in the app for anyone who wants it.
-                        ev_id = (payload.get("event") or {}).get("event_id")
-                        # Keyed on the event where there is one, but a missing
-                        # or ZERO event id must not skip the clear: a mock
-                        # without push-to-start reports event_id 0, `if ev_id`
-                        # read that as falsy, and the whole clear-and-re-arm
-                        # path was silently skipped in every mock that could
-                        # have tested it. Ending cards needs no event id — only
-                        # the re-arm below does.
-                        disarm_key = ev_id or "no-event"
-                        if disarm_key not in _LA_DISARMED:
-                            cleared = _la_end_activities(None, 0)
-                            if cleared:
-                                _LA_STATS["cleared_early"] = (
-                                    _LA_STATS.get("cleared_early", 0) + cleared)
-                            # RE-ARM. Without this the clear above is permanent:
-                            # push-to-start fires once per phone per event, so a
-                            # card cleared here could never come back when the
-                            # racing started. That is what happened at Columbus.
-                            try:
-                                if ev_id:
-                                    with _pool.connection() as conn:
-                                        conn.execute(
-                                            "DELETE FROM push_sent WHERE key LIKE %s",
-                                            (f"lastart:{ev_id}:%",))
-                                    with _LA_STARTED_LOCK:
-                                        _LA_STARTED.difference_update(
-                                            {p for p in _LA_STARTED
-                                             if p[0] == ev_id})
-                                _LA_DISARMED.add(disarm_key)
-                                log.info(
-                                    "live-activity: cleared %d card(s) and "
-                                    "re-armed push-to-start — %r does not earn "
-                                    "a lock screen", cleared,
-                                    (payload.get("timing") or {}).get("race_name"))
-                            except Exception:
-                                log.exception("live-activity: re-arm failed")
-                    elif not payload.get("live"):
-                        # Racing's over. End every activity and forget the tokens
-                        # (fresh ones register next race day).
-                        #
-                        # When the DAY is done we leave the finish up for an hour
-                        # rather than blanking it — that last frame is the result
-                        # people want, and iOS clears it on its own afterwards, so
-                        # nothing depends on us pushing again. Any other reason for
-                        # going not-live (window closed, feed gone) clears at once.
-                        done = payload.get("day_complete")
-                        if done:
-                            # The whole programme is over, so leave BOTH
-                            # classes up rather than whichever raced last.
-                            # Falls back to the last race's order when the day
-                            # doesn't settle on mains (an MX round), which is
-                            # what shipped before this existed.
-                            ev = payload.get("event") or {}
-                            # A mock carries its results in the payload; a real
-                            # day has them in the database by now (the results
-                            # ingest runs every 3 min while an event is live).
-                            by_class = (payload.get("day_results")
-                                        or (_la_day_results(ev.get("event_id"))
-                                            if ev.get("event_id") else None))
-                            # Nothing for 250/450 means a round that settles on
-                            # MOTOS rather than a main — every SMX playoff and
-                            # every MX round. Take the series' own published
-                            # Overall; never add the motos up here.
-                            if (ev.get("event_id")
-                                    and not _la_has_championship_classes(by_class)):
-                                by_class = (_la_day_results_from_overalls(
-                                    ev["event_id"]) or by_class)
-                            overall = (_la_overall_state(ev, by_class)
-                                       if by_class else None)
-                            final = overall or _la_final_state(payload)
-                            hold = _LA_RESULT_HOLD_S
-                        else:
-                            # Not the end of the DAY, but we are still going
-                            # not-live — the feed dropped out, or the window is
-                            # about to shut. Leave the last order up rather than
-                            # blanking it; a result beats an empty card, and it
-                            # matches what the window-close path now does.
-                            final, hold = _la_closing_frame(last_pushed)
-                        last_state = last_pushed = None
-                        _la_end_activities(final, hold)
-        except Exception:
-            log.exception("live-activity: push cycle failed")   # next tick retries
-        time.sleep(_LA_INTERVAL_S)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
@@ -1332,8 +377,6 @@ async def lifespan(app: FastAPI):
     )
     _pool.open()
     threading.Thread(target=_notify_loop, daemon=True, name="notify-loop").start()
-    threading.Thread(target=_live_activity_loop, daemon=True,
-                     name="live-activity-loop").start()
     try:
         yield
     finally:
@@ -1533,78 +576,14 @@ def health():
     # 08-31. One boolean answers "is the feature even switched on".
     mock = dict(mockrace.status())
     mock["configured"] = bool(os.environ.get("MXT_MOCK_KEY"))
-    return {"status": "ok", "db": True, "apns": apns_ready(),
+    return {"status": "ok", "db": True,
             # WHICH BUILD IS ANSWERING. Render sets RENDER_GIT_COMMIT on every
             # deploy. Without this there is no way to tell from outside whether
             # a push has actually landed — a deploy whose changes are not
             # externally visible is indistinguishable from one that never
-            # happened, which cost real confusion on 09-01. Same family as
-            # `configured` and `seconds_since_cycle`: report the freshness of
-            # the thing, not just the thing.
+            # happened, which cost real confusion on 09-01.
             "commit": (os.environ.get("RENDER_GIT_COMMIT") or "")[:7] or None,
-            "mock_race": mock,
-            "live_activity": _la_health()}
-
-
-def _la_health() -> dict:
-    """Enough to diagnose a stale lock screen WHILE it is stale."""
-    now = time.time()
-    last = _LA_STATS.get("last_push_at")
-    cyc = _LA_STATS.get("last_cycle_at")
-    return {
-        # IS THE LOOP EVEN ALIVE? Read this before anything else here.
-        # Every other field is written once per cycle and never cleared, so
-        # they all survive the loop sleeping — or dying. A `tokens: 36,
-        # cycle_ms: 87` that was five hours stale read exactly like a healthy
-        # loop (08-31). Expect <= _LA_IDLE_INTERVAL_S off race day and
-        # <= ~_LA_INTERVAL_S during one. Much larger, or None once the process
-        # has been up a while, means the thread is gone and every lock screen
-        # is frozen on its last frame.
-        "seconds_since_cycle": round(now - cyc, 1) if cyc else None,
-        "tokens": _LA_STATS.get("tokens"),
-        # HOW MANY CARDS WE CAN ACTUALLY REACH. `tokens` counts both kinds, and
-        # start tokens outnumber update tokens roughly forty to one, so it stays
-        # reassuringly large while the number that matters is zero.
-        #
-        # Columbus 09-12 is the whole argument for this field. All day: pushes
-        # climbing, failed 0, tokens 38 — and every card on every phone frozen
-        # on "on the gate", because there were no UPDATE tokens and Apple
-        # accepts pushes to activities that no longer exist. This is the one
-        # number that would have said so at 10am instead of the next morning.
-        #
-        # Zero while a points race is on means NOBODY has a live card.
-        "update_tokens": _LA_STATS.get("update_tokens"),
-        # What the loop last decided about whether this session earns a lock
-        # screen, and off which race name. "cards_wanted false" during a moto is
-        # a bug; during qualifying it is the design.
-        "cards_wanted": _LA_STATS.get("cards_wanted"),
-        "last_push_race": _LA_STATS.get("race"),
-        "seconds_since_push": round(now - last, 1) if last else None,
-        # How long one cycle spends scraping. If this approaches the push
-        # interval the loop is the bottleneck, not Apple.
-        "live_call_ms": _LA_STATS.get("live_ms"),
-        "cycle_ms": _LA_STATS.get("cycle_ms"),
-        "push_interval_s": _LA_INTERVAL_S,
-        # Pushes actually sent vs cycles that had nothing new worth spending
-        # Apple's budget on. If `pushes` climbs by six a minute, the clock is
-        # counting as news again and the throttle is coming.
-        "pushes": _LA_STATS.get("pushes", 0),
-        "skipped": _LA_STATS.get("skipped", 0),
-        # Non-zero here with pushes flat means Apple is refusing them, which
-        # looks identical on a lock screen to a loop that never ran.
-        "failed": _LA_STATS.get("failed", 0),
-        "last_error": _LA_STATS.get("last_error"),
-        # PUSH-TO-START, reported separately. It fires once per event to launch
-        # a card on a phone whose app is closed, and until 09-02 its outcome
-        # was thrown away — so the path that has never been tested was also the
-        # path that could fail silently. Kept out of `pushes`/`failed` so it
-        # cannot distort the ~3/min rate those are read against.
-        # On race day: `starts` should equal the number of registered start
-        # tokens, once, near the beginning of the event.
-        "starts": _LA_STATS.get("starts", 0),
-        "starts_failed": _LA_STATS.get("starts_failed", 0),
-        "last_start_error": _LA_STATS.get("last_start_error"),
-    }
+            "mock_race": mock}
 
 
 # --- race-day weather (open-meteo, free, no key) -----------------------------
@@ -2303,13 +1282,6 @@ def _clock_is_ticking(timing) -> bool:
         return False
 
 
-# What the lock-screen loop last did. The Live Activity lagged two minutes
-# behind the app at Ironman and a screenshot cannot say why: whether the loop
-# was slow, the push was skipped as unchanged, or APNs dropped it. These are
-# the three numbers that tell them apart, readable while the next race runs.
-_LA_STATS: dict = {}
-
-
 def _retire_round(event_id) -> None:
     """Mark a round finished, durably.
 
@@ -2544,40 +1516,18 @@ def _combined_qualifying(race_name, live_riders):
 
 @app.post("/debug/mock-race")
 def mock_race(minutes: int = 12, key: str = "", stop: bool = False,
-              sessions: int = 1, push_to_start: bool = False, hold: int = 0,
-              warmup: int = 0):
+              sessions: int = 1, hold: int = 0, warmup: int = 0):
     """Drive a synthetic race through the real live path. See src/mockrace.py.
 
     Guarded by MXT_MOCK_KEY: unset, this 404s and the feature does not exist.
     A run is labelled plainly as a system test — it exercises the machinery
     without telling anyone a race is happening.
-
-    `push_to_start=true` is the one thing that reaches OTHER people's phones
-    without them opening the app, so it is opt-in and off by default.
     """
     want = os.environ.get("MXT_MOCK_KEY")
     if not want or key != want:
         raise HTTPException(status_code=404, detail="not found")
     if stop:
         return mockrace.stop()
-    if push_to_start:
-        # The loop fires push-to-start once per event, guarded by a `push_sent`
-        # row. Clear ours so an opt-in run can fire again — otherwise the very
-        # first test would be the only one that ever worked, which is the least
-        # useful possible outcome for the path we are trying to prove.
-        # Per-token since 09-11, so clear every token's row for the mock event,
-        # the old per-event row, AND this process's memory of launching them —
-        # miss the last and a second opt-in run would silently launch nothing.
-        mock_ev = mockrace.PUSH_TO_START_EVENT_ID
-        try:
-            with _pool.connection() as conn:
-                conn.execute("DELETE FROM push_sent WHERE key = %s OR key LIKE %s",
-                             (f"lastart:{mock_ev}", f"lastart:{mock_ev}:%"))
-        except Exception:
-            log.exception("mock: could not clear the push-to-start guard")
-        with _LA_STARTED_LOCK:
-            _LA_STARTED.difference_update(
-                {p for p in _LA_STARTED if p[0] == mock_ev})
     # sessions>1 runs a PROGRAMME: moto, finish, next moto on the gate. The
     # seam between two sessions is the one thing a single-moto run cannot test,
     # and it is where the card has to pick up a new race name from a standing
@@ -2590,12 +1540,8 @@ def mock_race(minutes: int = 12, key: str = "", stop: bool = False,
     # that earns a lock screen. That is the sequence that broke Columbus and
     # the one no mock could reproduce: cards cleared during the morning, then
     # the motos, and nothing relaunching.
-    run = mockrace.start(minutes, sessions=sessions,
-                         push_to_start=push_to_start, hold_s=hold,
-                         warmup_s=warmup)
-    # Don't make the caller wait out the idle sleep to see anything happen.
-    _la_wake_now()
-    return run
+    return mockrace.start(minutes, sessions=sessions, hold_s=hold,
+                          warmup_s=warmup)
 
 
 @app.get("/live")
@@ -2611,16 +1557,11 @@ def live(demo: bool = False):
     timing feed so the live screen can be tested/demoed on any day.
     """
     # A mock run owns the live path entirely while it lasts: the app polls
-    # this, the Live Activity loop diffs it and pushes it to real phones. That
-    # is the point — the parts under test cannot tell it is synthetic.
-    # Zero unless the run opted into push-to-start, in which case it is truthy
-    # and the loop's start branch actually runs. See src/mockrace.py.
+    # this exactly as it polls a real race, so the screen under test cannot
+    # tell it is synthetic. See src/mockrace.py.
     _mock_event = {"event_id": mockrace.event_id(), "series": "SMX",
                    "venue": mockrace.VENUE, "city": "Columbus",
                    "state": "OH", "round_label": "System test",
-                   # The moment this run's racing starts. Without it the card
-                   # logic takes its no-start-time fallback and a mock can
-                   # never rehearse a morning with no cards.
                    "start_time_utc": mockrace.gate_utc(),
                    "event_date": None, "start_time_et": None,
                    "broadcast": None, "track_map": None}
@@ -2628,15 +1569,6 @@ def live(demo: bool = False):
     if mock:
         out = {"live": True, "mock": True, "timing": mock,
                "event": _mock_event}
-        # The card content, same as a real event gets. Without this a mock
-        # could not exercise the app-driven update() at all — the payload
-        # carried no card, the app had nothing to push into the activity, and
-        # a run would have "passed" while testing none of it.
-        if _ready_to_launch(_mock_event, mock):
-            try:
-                out["card"] = _la_content_state(out)
-            except Exception:
-                log.exception("mock: could not build the card state")
         return out
     # Racing is over but the mock is still running: report the day as complete
     # and carry the per-class results out with it. This is the ONLY way to make
@@ -2833,8 +1765,7 @@ def live(demo: bool = False):
 
     # Retire the day once the program's FINAL race is done (plus a short grace
     # so the finish stays visible). This is what drops Race Day out of red LIVE
-    # and lets _live_activity_loop tear down lock-screen activities, instead of
-    # both lingering for hours on the time window alone. Demo replays are exempt.
+    # instead of it lingering for hours on the time window alone. Demo replays are exempt.
     if not is_demo and _race_finished(timing) and _is_final_race_of_day(
             timing.get("race_name"), ev.get("series")):
         first = _DAY_DONE_AT.setdefault(ev["event_id"], time.monotonic())
@@ -2857,23 +1788,6 @@ def live(demo: bool = False):
         _DAY_DONE_AT.pop(ev.get("event_id"), None)
 
     out = {"live": True, "demo": is_demo, "event": ev, "timing": timing}
-    # The lock-screen card's content, decided HERE, so the app can push it into
-    # a running activity itself.
-    #
-    # A Live Activity cannot fetch anything — it only changes when something
-    # updates it. That has always meant an APNs push, which is six links long
-    # and silently broke for a whole race day. But while the app is OPEN it can
-    # update the card directly, with no server, no Apple and no token. This is
-    # the content for it to use.
-    #
-    # Built by the same _la_content_state the push path uses, so the two can
-    # never drift into saying different things about the same race — the
-    # failure that made "Winner" and "Leader" disagree for a day.
-    if not is_demo and _ready_to_launch(ev, timing):
-        try:
-            out["card"] = _la_content_state(out)
-        except Exception:
-            log.exception("live: could not build the card state")
     return out
 
 
@@ -3693,31 +2607,13 @@ def push_register(body: PushRegister):
     return {"ok": True, "following": len(body.rider_ids), "prefs": prefs}
 
 
-class LiveActivityRegister(BaseModel):
-    token: str
-    kind: str = "update"   # 'update' (one running activity) | 'start' (iOS 17.2+)
-
-
+# The lock-screen Live Activity was removed in October 2026: it could not be
+# kept reliably in step with the race, and a confidently wrong card cost more
+# trust than no card. App builds before 1.7.0 still POST their tokens here, so
+# the route stays and accepts them without storing anything — a 404 or 500
+# would only add errors to old installs for no benefit.
 @app.post("/live-activity/register")
-def live_activity_register(body: LiveActivityRegister):
-    """Store a Live Activity APNs token so the race-day loop can address the
-    lock-screen activity. Tokens rotate freely; stale ones self-prune when
-    Apple rejects them."""
-    if body.kind not in ("update", "start"):
-        raise HTTPException(status_code=400, detail="kind must be update|start")
-    if not re.fullmatch(r"[0-9a-fA-F]{32,200}", body.token or ""):
-        raise HTTPException(status_code=400, detail="not an APNs token")
-    with _pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO live_activity_tokens (token, kind, updated_at)
-                VALUES (%s, %s, now())
-                ON CONFLICT (token) DO UPDATE
-                  SET kind = EXCLUDED.kind, updated_at = now()
-                """,
-                (body.token, body.kind),
-            )
+def live_activity_register():
     return {"ok": True}
 
 
@@ -3759,55 +2655,15 @@ def _widget_cache(payload):
 
 @app.get("/widget/standings")
 def widget_standings():
-    """What the home-screen standings widget should show right now.
-
-    Off race day that's the championship top five. While a session is running
-    it's the live order instead — season points frozen at last week's total are
-    the wrong thing to stare at mid-moto. Deliberately shaped like /rundown so
-    the widget's existing decoder handles both. (iOS decides when to refresh a
-    widget, so this lags the app by minutes; the lock-screen Live Activity is
-    the real-time surface.)
+    """What the home-screen standings widget should show: the championship and
+    the next race. Never the live running order — the widgets stopped showing
+    live timing in October 2026, because iOS refreshes a widget when it likes,
+    and a running order minutes behind the track is wrong data. `live` stays in
+    the payload, always false, because builds before 1.7.0 decode it.
     """
-    # Answer fast or not at all. This calls live(), which on race day scrapes
-    # the feed and the results site and can take tens of seconds — and a widget
-    # that does not get an answer quickly does not retry, it renders "Can't
-    # reach MXT" and sits there. A minute-old running order is worth far more
-    # than a fresh one that never arrives.
     hit = _WIDGET_CACHE.get("all")
     if hit and hit[0] > time.time():
         return hit[1]
-    try:
-        lp = live()
-    except Exception:
-        lp = None
-    lt = (lp or {}).get("timing") if (lp or {}).get("live") else None
-    if not _widget_should_show_live((lp or {}).get("event"), lt):
-        lt = None            # stay on the championship — see the function
-    if lt:
-        cq = lt.get("combined_qualifying")
-        src = (cq.get("riders") if cq else lt.get("riders")) or []
-        state = lt.get("race_state") or "racing"
-        rows = [
-            {"position": r.get("position"), "rider_id": None,
-             "full_name": r.get("name"), "points": None,
-             "detail": (r.get("best_lap") if cq
-                        else ("Leader" if r.get("position") == 1
-                              else readable_gap(r.get("gap"))))}
-            for r in src[:5]
-        ]
-        if rows:
-            label = lt.get("race_name") or "On track"
-            if state == "staged":
-                label += " · on the gate"
-            elif state == "finished":
-                label += " · final"
-            # Key is "class" (not "klass") — that's what the widget decodes.
-            return _widget_cache({
-                "live": True, "next_gate_utc": None, "next_venue": None,
-                "next_start_et": None,
-                "series_long": ((lp.get("event") or {}).get("venue")
-                                or "Race day"),
-                "classes": [{"class": label, "top5": rows}]})
     rd = rundown()
     # When the next gates drop. iOS rations widget refreshes by the day, so the
     # widget spends them near the racing and coasts through a quiet week — but

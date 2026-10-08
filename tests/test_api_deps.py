@@ -26,12 +26,12 @@ API = ROOT / "src" / "api" / "main.py"
 # or a dependency-free module of our own.
 API_REQUIREMENTS = {
     "fastapi", "uvicorn", "psycopg", "psycopg_pool", "dotenv", "requests",
-    "bs4", "jwt", "cryptography", "httpx",
+    "bs4",
     "pydantic",          # ships with fastapi
     "starlette",         # ditto
 }
 # Ours, and each one must stay free of scraper dependencies.
-OUR_SLIM_MODULES = {"apns", "names", "config", "notify", "mockrace", "sessions",
+OUR_SLIM_MODULES = {"names", "config", "notify", "mockrace", "sessions",
                     "db", "standings"}
 
 

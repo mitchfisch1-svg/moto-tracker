@@ -35,17 +35,8 @@ _run: dict | None = None
 MAX_MINUTES = 45          # a moto is 30 + 2 laps; never leave one running longer
 MIN_MINUTES = 3           # shorter than this and the gate phase eats the session
 
-# The event id a run reports. ZERO by default, and that is load-bearing: the
-# loop guards push-to-start with `f"lastart:{ev_id}" if ev_id else None`, so a
-# falsy id means the start branch never runs and a mock cannot remote-launch a
-# card onto anyone's lock screen.
-#
-# With push_to_start=true it reports PUSH_TO_START_EVENT_ID instead, which is
-# truthy — so the branch DOES run and the one path no mock could ever reach
-# finally gets exercised. Deliberately far outside the real id range (they are
-# small serials) so its `push_sent` key can never collide with a real event's.
+# The event id a run reports: zero, which no real event has.
 DEFAULT_EVENT_ID = 0
-PUSH_TO_START_EVENT_ID = 999_999
 MAX_SESSIONS = 4          # a real day is more, but a test nobody watches is waste
 VENUE = "MXT System Test"
 RACE = "Mock Moto (system test)"
@@ -109,8 +100,7 @@ _FIELD = [
 
 
 def start(minutes: int, seed: int = 7, sessions: int = 1,
-          push_to_start: bool = False, hold_s: int = 0,
-          warmup_s: int = 0) -> dict:
+          hold_s: int = 0, warmup_s: int = 0) -> dict:
     """Begin a run of `sessions` back-to-back sessions. Returns its status.
 
     Each session is `minutes` long (two of them on the gate, the rest racing)
@@ -147,8 +137,7 @@ def start(minutes: int, seed: int = 7, sessions: int = 1,
             # and never build the card this phase exists to show.
             "duration_s": racing + DAY_DONE_S,
             "seed": int(seed),
-            "event_id": (PUSH_TO_START_EVENT_ID if push_to_start
-                         else DEFAULT_EVENT_ID),
+            "event_id": DEFAULT_EVENT_ID,
         }
         return _status_locked()
 
@@ -390,8 +379,7 @@ def gate_utc():
 def event_id() -> int:
     """The event id `/live` should report for the current run.
 
-    Zero unless the run opted into push-to-start — see the constants above.
-    Zero when nothing is running, which is the safe answer either way.
+    Always zero, which no real event has.
     """
     with _lock:
         return (_run or {}).get("event_id", DEFAULT_EVENT_ID)
