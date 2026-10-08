@@ -166,7 +166,10 @@ def _season_ids_known(cur, _http):
 def _rounds_complete(cur, http):
     if not http:
         return []
-    from src.adapters.results_html import ResultsHTMLAdapter
+    # Counted here rather than through the ingest adapter: that pulls in
+    # RapidFuzz, and this job runs on the slim API requirements. Same rule as
+    # list_points_races: the scoring classes, mains and motos.
+    from src.sessions import classify
     cur.execute(
         """
         SELECT e.id, e.venue, e.source_url,
@@ -176,13 +179,23 @@ def _rounds_complete(cur, http):
           AND e.source_url LIKE '%%view_event%%'
         GROUP BY e.id, e.venue, e.source_url
         """)
-    adapter, bad = ResultsHTMLAdapter(), []
+    bad = []
     for eid, venue, url, stored in cur.fetchall():
         m = re.search(r"[?&]id=(\d+)", url or "")
         if not m:
             continue
-        races = adapter.list_points_races(m.group(1))
-        listed = [r for r in races if r[3] in ("main", "moto")]
+        page = requests.get("https://results.supermotocross.com/results/"
+                            f"?p=view_event&id={m.group(1)}", headers=UA,
+                            timeout=30)
+        page.raise_for_status()
+        listed = set()
+        for a in BeautifulSoup(page.text, "html.parser").find_all("a", href=True):
+            rid = re.search(r"view_race_result&(?:amp;)?id=(\d+)", a["href"])
+            if not rid or "export=pdf" in a["href"]:
+                continue
+            cls, typ = classify(a.get_text(" ", strip=True))
+            if cls in ("450", "250", "WMX") and typ in ("main", "moto"):
+                listed.add(rid.group(1))
         if len(listed) > stored:
             bad.append(f"{venue} (event {eid}): {stored} of {len(listed)} "
                        "points races stored")

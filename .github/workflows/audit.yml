@@ -26,4 +26,24 @@ jobs:
       - name: Check production invariants
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python scripts/audit.py
+        run: |
+          set -o pipefail
+          python scripts/audit.py | tee audit.txt
+      # A red job on GitHub went unseen for 11 days in September, and the test
+      # job for four weeks. So a failure goes to Mitch's phone (ntfy, topic in
+      # the NTFY_TOPIC secret): when a check first fails, then every six hours
+      # while it stays failed, so a problem nags without paging every hour.
+      - name: Tell Mitch's phone
+        if: failure()
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          API_RUNS: ${{ github.api_url }}/repos/${{ github.repository }}/actions/workflows/audit.yml/runs?status=completed&per_page=1
+        run: |
+          [ -n "$NTFY_TOPIC" ] || exit 0
+          prev=$(curl -s "$API_RUNS" | python3 -c "import json,sys; r=json.load(sys.stdin).get('workflow_runs') or [{}]; print(r[0].get('conclusion') or '')")
+          hour=$(date -u +%H)
+          if [ "$prev" = "failure" ] && [ $((10#$hour % 6)) -ne 0 ]; then exit 0; fi
+          msg=$(grep -A3 '^FAIL' audit.txt 2>/dev/null | head -c 1200)
+          [ -n "$msg" ] || msg="The audit job itself failed to run."
+          curl -s -H "Title: MXT data check failed" -H "Priority: high" -H "Tags: warning"             -H "Click: $RUN_URL" -d "$msg" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null

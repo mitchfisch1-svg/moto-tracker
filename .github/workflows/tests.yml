@@ -19,7 +19,18 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      # requirements-api.txt, not the full pipeline set: the tests import
-      # src/api/main.py and nothing heavier.
-      - run: pip install -r requirements-api.txt pytest
+      # The FULL requirements. This said "the tests import src/api/main.py and
+      # nothing heavier", which stopped being true when the rider-resolver tests
+      # arrived (RapidFuzz): the job failed on every push from 09-12 to 10-08
+      # and nobody saw it. That the API itself stays slim is checked by
+      # tests/test_api_deps.py, which reads the import graph instead.
+      - run: pip install -r requirements.txt pytest
       - run: python -m pytest tests/ -q
+      - name: Tell Mitch's phone
+        if: failure()
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$NTFY_TOPIC" ] || exit 0
+          curl -s -H "Title: MXT tests failed" -H "Tags: x" -H "Click: $RUN_URL"             -d "The test suite failed on ${GITHUB_SHA::7}. Tap for the run."             "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
