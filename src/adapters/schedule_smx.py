@@ -154,7 +154,10 @@ class ScheduleSMXAdapter(BaseAdapter):
         return resp.text
 
     # --- normalize ---------------------------------------------------------
-    def normalize(self, raw: str) -> list[dict]:
+    def normalize(self, raw: str, today: datetime.date | None = None) -> list[dict]:
+        """Parse the schedule page. `today` is the date the page is read as of:
+        the real date, or the capture date when replaying an archived copy."""
+        today = today or datetime.date.today()
         soup = BeautifulSoup(raw, "html.parser")
         cards = soup.select(".event-item")
         if not cards:
@@ -184,7 +187,7 @@ class ScheduleSMXAdapter(BaseAdapter):
             race_type = self._text(card, None, "race-type")
 
             city, state = self._split_location(location)
-            event_date = self._parse_date(date_text)
+            event_date = self._parse_date(date_text, status_token, today)
             start_utc = self._parse_start_utc(event_date, time_text)
 
             link = card.find("a", href=lambda h: h and "view_event" in h)
@@ -215,16 +218,32 @@ class ScheduleSMXAdapter(BaseAdapter):
         return parsed
 
     # --- upsert ------------------------------------------------------------
-    def upsert(self, conn, rows: list[dict]) -> int:
-        # Resolve series abbrev -> season_id for the current year.
-        season_by_abbrev = self._season_ids(conn)
+    def upsert(self, conn, rows: list[dict], force: bool = False) -> int:
+        """`force` lets a write move a finished round's date: only for restoring
+        a season from an archived page, never for the weekly run."""
+        # Each event goes into the season of ITS year (see _parse_date), and a
+        # season the page has moved on to is created when first seen.
+        years = {r["event_date"].year for r in rows if r.get("event_date")}
+        season_ids = {y: self._season_ids(conn, y) for y in years}
+        finished = self._finished_dates(conn)
 
         now = datetime.datetime.now(datetime.timezone.utc)
         db_rows = []
         for r in rows:
-            season_id = season_by_abbrev.get(r["series_abbrev"])
+            if not r.get("event_date"):
+                continue
+            season_id = season_ids[r["event_date"].year].get(r["series_abbrev"])
             if season_id is None:
                 continue  # series not seeded — skip rather than fail
+            # A finished round's date is history. If a write would move it by
+            # more than a few days, the page is describing a different event:
+            # refuse, loudly, rather than overwrite the round people raced.
+            was = finished.get((season_id, r["round_number"]))
+            if was and not force and abs((r["event_date"] - was).days) > 3:
+                print(f"[schedule_smx] REFUSED: would move finished "
+                      f"{r['series_abbrev']} round {r['round_number']} from "
+                      f"{was} to {r['event_date']}")
+                continue
             db_rows.append(
                 {
                     "season_id": season_id,
@@ -280,7 +299,16 @@ class ScheduleSMXAdapter(BaseAdapter):
         return city.strip(), state.strip()
 
     @staticmethod
-    def _parse_date(date_text):
+    def _parse_date(date_text, status_token="upcoming", today=None):
+        """The page prints "09 jan" with no year, so the year is inferred.
+
+        It used to be "the current year", always. In October the page switched
+        to 2027, and the 06:00 Monday run on 10-05 wrote 2027's dates and venues
+        over every 2026 Supercross and Motocross round (same season, same round
+        numbers). Now: a round the page calls upcoming cannot be in the past,
+        so one that would be is next year's; a finished one cannot be in the
+        future, so one that would be is last year's.
+        """
         if not date_text:
             return None
         m = _DATE_RE.search(date_text)
@@ -290,11 +318,15 @@ class ScheduleSMXAdapter(BaseAdapter):
         month = MONTHS.get(m.group(2).lower())
         if not month:
             return None
-        # The schedule page has no year; the championship runs within one
-        # calendar year, so use the current year.
-        year = datetime.date.today().year
+        today = today or datetime.date.today()
         try:
-            return datetime.date(year, month, day)
+            d = datetime.date(today.year, month, day)
+            slack = datetime.timedelta(days=3)
+            if status_token == "upcoming" and d < today - slack:
+                d = datetime.date(today.year + 1, month, day)
+            elif status_token in ("past", "completed") and d > today + slack:
+                d = datetime.date(today.year - 1, month, day)
+            return d
         except ValueError:
             return None
 
@@ -348,10 +380,18 @@ class ScheduleSMXAdapter(BaseAdapter):
                     next_num += 1
 
     @staticmethod
-    def _season_ids(conn):
-        """Return {series_abbrev: season_id} for the current year."""
-        year = datetime.date.today().year
+    def _season_ids(conn, year):
+        """Return {series_abbrev: season_id} for `year`, creating the seasons
+        if the page has moved on to a year we have not seen yet."""
         with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO seasons (series_id, year)
+                SELECT id, %s FROM series
+                ON CONFLICT (series_id, year) DO NOTHING
+                """,
+                (year,),
+            )
             cur.execute(
                 """
                 SELECT s.abbrev, se.id
@@ -362,3 +402,11 @@ class ScheduleSMXAdapter(BaseAdapter):
                 (year,),
             )
             return {abbrev: sid for abbrev, sid in cur.fetchall()}
+
+    @staticmethod
+    def _finished_dates(conn):
+        """{(season_id, round_number): event_date} for every finished round."""
+        with conn.cursor() as cur:
+            cur.execute("SELECT season_id, round_number, event_date FROM events "
+                        "WHERE status = 'final' AND event_date IS NOT NULL")
+            return {(sid, rnd): d for sid, rnd, d in cur.fetchall()}

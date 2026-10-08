@@ -160,6 +160,41 @@ def _season_ids_known(cur, _http):
     return bad
 
 
+@check("every finished round's date matches the timing site",
+       "on 10-05 the weekly schedule run wrote 2027's dates and venues over "
+       "every 2026 Supercross and Motocross round")
+def _rounds_match_site(cur, http):
+    if not http:
+        return []
+    page = requests.get("https://results.supermotocross.com/events/",
+                        headers=UA, timeout=30)
+    page.raise_for_status()
+    listed = {}   # results-site event id -> date
+    for tr in BeautifulSoup(page.text, "html.parser").find_all("tr"):
+        a = tr.find("a", href=re.compile(r"view_event"))
+        tds = tr.find_all("td")
+        m = a and re.search(r"id=(\d+)", a["href"])
+        if not m or len(tds) < 2:
+            continue
+        try:
+            listed[m.group(1)] = datetime.datetime.strptime(
+                tds[-1].get_text(strip=True), "%b %d, %Y").date()
+        except ValueError:
+            continue
+    cur.execute(
+        """
+        SELECT venue, event_date, source_url FROM events
+        WHERE status = 'final' AND source_url LIKE '%%view_event%%'
+        """)
+    bad = []
+    for venue, when, url in cur.fetchall():
+        m = re.search(r"[?&]id=(\d+)", url or "")
+        site = listed.get(m.group(1)) if m else None
+        if site and site != when:
+            bad.append(f"{venue}: we have {when}, the timing site has {site}")
+    return bad
+
+
 @check("every finished round has every points race the site lists",
        "the final went twelve days without 450 Moto 2, the race that decided "
        "the title, and LA five days without either Moto 2")
