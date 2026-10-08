@@ -97,3 +97,4 @@ def test_a_region_tag_does_not_hide_a_shouted_name():
     assert titlecase_name("HAIDEN DEEGAN (West)") == "Haiden Deegan (West)"
     assert titlecase_name("TRE FIERRO III (East)") == "Tre Fierro III (East)"
     assert titlecase_name("Haiden Deegan (West)") == "Haiden Deegan (West)"
+    assert titlecase_name("HAIDEN DEEGAN (WEST)") == "Haiden Deegan (West)"
