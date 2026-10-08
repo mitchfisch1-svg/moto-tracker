@@ -180,7 +180,11 @@ def load_recap():
         by_class.setdefault(cls, []).append(
             dict(sid=sid, rid=rid, name=name, num=num, make=make,
                  shot=shot, pos=pos, pts=pts or 0))
-    for cls, cr in sorted(by_class.items(), reverse=True):  # 450 first
+    for cls, cr in sorted(by_class.items(),
+                                  key=lambda kv: ({'450': 0, '250': 1}.get(kv[0], 2), kv[0])):
+        # 450, then 250, then anything else. This was reverse-alphabetical,
+        # which only put 450 first while 450 and 250 were the only classes:
+        # the final also ran a WMX main, and its recap led with WMX.
         last_sid = max(r["sid"] for r in cr)
         agg = {}
         for r in cr:

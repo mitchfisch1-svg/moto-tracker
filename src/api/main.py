@@ -3136,15 +3136,20 @@ def recap():
     rows = query(
         """
         SELECT sess.class, sess.id AS session_id, sess.label,
-               r.rider_id, ri.full_name, ri.number, ri.manufacturer,
+               r.rider_id, ri.full_name,
+               -- What they raced under at THIS round's season.
+               COALESCE(rs.number, ri.number) AS number,
+               COALESCE(rs.manufacturer, ri.manufacturer) AS manufacturer,
                COALESCE(ri.headshot_override, ri.headshot_racerx, ri.headshot_url) AS headshot_url,
                r.position, r.points
         FROM sessions sess
         JOIN results r ON r.session_id = sess.id
         JOIN riders  ri ON ri.id = r.rider_id
+        LEFT JOIN rider_seasons rs ON rs.rider_id = ri.id
+                                  AND rs.year = extract(year FROM %s::date)
         WHERE sess.event_id = %s
         """,
-        [ev["event_id"]],
+        [ev["event_date"], ev["event_id"]],
     )
 
     classes = []
@@ -3152,7 +3157,11 @@ def recap():
     for r in rows:
         by_class.setdefault(r["class"], []).append(r)
 
-    for cls, cls_rows in sorted(by_class.items(), reverse=True):  # 450 first
+    for cls, cls_rows in sorted(by_class.items(),
+                                  key=lambda kv: ({'450': 0, '250': 1}.get(kv[0], 2), kv[0])):
+        # 450, then 250, then anything else. This was reverse-alphabetical,
+        # which only put 450 first while 450 and 250 were the only classes:
+        # the final also ran a WMX main, and its recap led with WMX.
         last_session = max(r["session_id"] for r in cls_rows)
         agg: dict[int, dict] = {}
         for r in cls_rows:
@@ -3671,12 +3680,17 @@ def compare(
         r["rider_id"]: dict(r, points=None, position=None, wins=None, podiums=None)
         for r in query(
             """
-            SELECT r.id AS rider_id, r.full_name, r.number, r.team,
-                   r.manufacturer,
+            SELECT r.id AS rider_id, r.full_name,
+                   -- The season being compared, not the riders' latest teams.
+                   COALESCE(rs.number, r.number) AS number,
+                   COALESCE(rs.team, r.team) AS team,
+                   COALESCE(rs.manufacturer, r.manufacturer) AS manufacturer,
                    COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url
-            FROM riders r WHERE r.id = ANY(%s)
+            FROM riders r
+            LEFT JOIN rider_seasons rs ON rs.rider_id = r.id AND rs.year = %s
+            WHERE r.id = ANY(%s)
             """,
-            (ids,),
+            (year, ids),
         )
     }
     if len(riders) < 2:
