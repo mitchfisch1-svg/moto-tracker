@@ -1947,6 +1947,42 @@ def _overall_is_settled(both_motos) -> bool:
     return all(both_motos[:_OVERALL_SETTLED_ROWS])
 
 
+_FINISHES_RE = re.compile(r"^\d+(?:-\d+)*$")              # "1-2", "4-2-3", "1"
+_OVERALL_TOTAL_RE = re.compile(r"^(-?\d+)(?:\s*(?:pts|total))?$")
+
+
+def _label_overall_totals(rows) -> str:
+    """'points' or 'finishes': what an Overall's TOTAL column is a total OF.
+
+    The column is headed "TOTAL POINTS" everywhere, but only motocross adds up
+    championship points (25 + 22 = 47, highest wins). SMX rounds and SX Triple
+    Crowns add up FINISHING POSITIONS — Deegan's 1-2 is 3 and the lowest total
+    wins — so "3 pts" told readers the round winner scored three points. The
+    page says nothing about which it is; the numbers do. If every scored row's
+    total is the sum of its finishes, they are finishes.
+
+    Relabels each row's `secondary` to match, in place. Idempotent, so it also
+    heals copies stored before it existed.
+    """
+    checked, sums = 0, True
+    for r in rows:
+        m = _OVERALL_TOTAL_RE.match((r.get("secondary") or "").strip())
+        fin = (r.get("primary") or "").strip()
+        if not m or not _FINISHES_RE.match(fin):
+            continue
+        checked += 1
+        if sum(int(x) for x in fin.split("-")) != int(m.group(1)):
+            sums = False
+            break
+    scoring = "finishes" if checked and sums else "points"
+    unit = "total" if scoring == "finishes" else "pts"
+    for r in rows:
+        m = _OVERALL_TOTAL_RE.match((r.get("secondary") or "").strip())
+        if m:
+            r["secondary"] = f"{m.group(1)} {unit}"
+    return scoring
+
+
 # Bike makes recognized inside team names (kept in sync with results_html.py).
 _MAKES = ["KTM", "Honda", "Yamaha", "Kawasaki", "Suzuki", "GasGas", "GASGAS", "GAS GAS",
           "Husqvarna", "Ducati", "Triumph", "Beta", "Stark"]
@@ -2196,6 +2232,8 @@ def live_session_results(race_id: int, p: str = "view_race_result",
     # (from inside a race weekend, or saved before `final` existed) is only a
     # fallback for when the site cannot be reached.
     stored = _db_cache_get(db_key)
+    if stored is not None and p == "view_multi_main_result":
+        stored["scoring"] = _label_overall_totals(stored.get("results") or [])
     if stored is not None and stored.get("final"):
         _SESSIONS_CACHE[cache_key] = (time.time() + _SESSION_RESULT_TTL, stored)
         return stored
@@ -2299,6 +2337,7 @@ def live_session_results(race_id: int, p: str = "view_race_result",
         # from a Triple Crown with a race still to run — both read "4-2" once
         # the columns are gone. Say so here rather than guessing later.
         payload["settled"] = _overall_is_settled(both_motos)
+        payload["scoring"] = _label_overall_totals(rows)
     # Final only with times on the board, outside a race weekend, and, for an
     # Overall, with every race scored: one fetched between the motos is half a
     # result wearing the shape of one ("1---- 25 pts").
@@ -3329,6 +3368,8 @@ def _event_overall(source_url, event_status=None, expected_classes=0):
         return []
     key = f"overall:{smx}"
     stored = _db_cache_get(key) or []
+    for b in stored:     # boards banked before `scoring` existed say "3 pts"
+        b["scoring"] = _label_overall_totals(b.get("rows") or [])
     if stored and len(stored) >= max(expected_classes, 1):
         return stored           # every class that raced is on the board
     # Re-scraping the link page per request would be brutal on race day, when
@@ -3359,7 +3400,8 @@ def _event_overall(source_url, event_status=None, expected_classes=0):
         rows = (res or {}).get("results") or []
         if rows:
             out.append({"label": label, "race_id": race_id, "rows": rows,
-                        "settled": bool((res or {}).get("settled"))})
+                        "settled": bool((res or {}).get("settled")),
+                        "scoring": _label_overall_totals(rows)})
 
     # A class is missing from `out` two ways: its second moto has not run, or
     # the site has not posted its Overall link yet — at noon the page may list

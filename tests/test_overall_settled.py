@@ -350,7 +350,59 @@ def test_the_total_is_read_from_its_own_column(monkeypatch):
     """With three races the total sits one column further right. Assuming its
     position turned Webb's third-race finish into his points."""
     rows, _ = _scrape(monkeypatch, _triple_crown_page(_TC_ROWS), 493648)
-    assert [r["secondary"] for r in rows] == ["9 pts", "10 pts", "10 pts"]
+    assert [r["secondary"] for r in rows] == ["9 total", "10 total", "10 total"]
+
+
+# --- what the total is a total OF --------------------------------------------
+# Headed "TOTAL POINTS" on every page. Motocross adds championship points
+# (highest wins); SMX and the Triple Crown add finishing positions (lowest
+# wins). The 2026 SMX final printed Deegan's 1-2 as "3 pts".
+def _scoring(monkeypatch, html):
+    from src.api import main
+
+    _scrape(monkeypatch, html, 1)
+    return main.live_session_results(1, p="view_multi_main_result")
+
+
+def test_an_smx_overall_is_a_total_of_finishes(monkeypatch):
+    smx = _page(["1-2", "5-1", "3-3"], ["3", "6", "6"])   # Deegan, Prado, Lawrence
+    out = _scoring(monkeypatch, smx)
+    assert out["scoring"] == "finishes"
+    assert [r["secondary"] for r in out["results"]] == ["3 total", "6 total", "6 total"]
+
+
+def test_a_triple_crown_is_a_total_of_finishes(monkeypatch):
+    out = _scoring(monkeypatch, _triple_crown_page(_TC_ROWS))
+    assert out["scoring"] == "finishes"
+
+
+def test_a_motocross_overall_is_points(monkeypatch):
+    mx = _page(["1-1", "3-3", "2-4"], ["50", "40", "40"])
+    out = _scoring(monkeypatch, mx)
+    assert out["scoring"] == "points"
+    assert [r["secondary"] for r in out["results"]] == ["50 pts", "40 pts", "40 pts"]
+
+
+def test_one_row_that_happens_to_add_up_does_not_flip_motocross():
+    """10-10 is 22 points and 20 positions, but 12-12 is 18 and 24, and some
+    row on a real MX board always breaks the coincidence."""
+    from src.api.main import _label_overall_totals
+
+    rows = [{"primary": "1-1", "secondary": "50 pts"},
+            {"primary": "9-9", "secondary": "18 pts"}]   # 9+9 == 18 by chance
+    assert _label_overall_totals(rows) == "points"
+
+
+def test_a_board_stored_before_the_fix_heals_on_read():
+    """Final boards live in the DB for good, already saying "3 pts"."""
+    from src.api.main import _label_overall_totals
+
+    rows = [{"primary": "1-2", "secondary": "3 pts"},
+            {"primary": "5-1", "secondary": "6 pts"}]
+    assert _label_overall_totals(rows) == "finishes"
+    assert [r["secondary"] for r in rows] == ["3 total", "6 total"]
+    assert _label_overall_totals(rows) == "finishes"          # idempotent
+    assert [r["secondary"] for r in rows] == ["3 total", "6 total"]
 
 
 def test_a_triple_crown_with_a_race_to_go_is_not_stored(monkeypatch):
