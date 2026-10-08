@@ -759,9 +759,11 @@ def standings(
     klass: str | None = Query(None, alias="class"),
     year: int | None = None,
 ):
-    if (klass or "").upper() == "WMX":
-        return _wmx_standings()
     year = year or _current_year()
+    # WMX is read off its official table for the season that table is (2026);
+    # any other season comes from the standings table like everything else.
+    if (klass or "").upper() == "WMX" and year == _WMX_SEASON:
+        return _wmx_standings()
     # SMX is the playoff championship, read off the official table: the
     # `standings` table holds the seeding. See _SMX_PLAYOFF_POINTS.
     if series.upper() == "SMX" and year in _SMX_PLAYOFF_POINTS:
@@ -794,6 +796,27 @@ def standings(
         leader.setdefault(row["class"], row["points"])
         row["gap"] = leader[row["class"]] - row["points"]
     return rows
+
+
+@app.get("/standings/years")
+def standings_years(series: str):
+    """The seasons the app can show standings for, newest first. Only seasons
+    with standings: an empty year in the picker would only ever say "nothing
+    here". 2027 appears when its first round is scored."""
+    ser = series.upper()
+    rows = query(
+        """
+        SELECT DISTINCT se.year FROM standings st
+        JOIN seasons se ON se.id = st.season_id
+        JOIN series  s  ON s.id  = se.series_id
+        WHERE s.abbrev = %s
+        """,
+        [ser],
+    )
+    years = {r["year"] for r in rows}
+    if ser == "SMX":
+        years |= set(_SMX_PLAYOFF_POINTS)
+    return sorted(years, reverse=True)
 
 
 # --- manufacturers' championships: the series' own tables ---------------------
@@ -2294,6 +2317,7 @@ def live_session_results(race_id: int, p: str = "view_race_result",
 # cached in memory + DB like session results. rider_id is null (no rider pages).
 _WMX_SERIES_URL = (_RESULTS_HOME +
                    "?p=view_series_points&id=25")   # 2026 WMX Motocross Championship
+_WMX_SEASON = 2026   # the season id 25 is; next year's WMX needs its own id
 _WMX_TTL = 600
 _ROUND_COL_RE = re.compile(r"^\d+:")
 _FINISH_RE = re.compile(r"^\d+(st|nd|rd|th)$", re.I)

@@ -30,11 +30,15 @@ _URL = RESULTS_HOME + "?p=view_series_points&id={sid}&event_id={eid}"
 _UA = {"User-Agent": "Mozilla/5.0 (compatible; MotoTracker/1.0; "
                      "+https://motoxtracker.com)"}
 
-# (series abbrev, our standings class, the provider's series-points id).
-# Ids read off the links on any event page; they are stable across the season.
-# Manufacturers (23/17/24) are deliberately absent — /standings/manufacturers
-# computes those from results and has no adjustments to miss.
-CHAMPIONSHIPS = [
+# Per season: (series abbrev, our standings class, the provider's series-points
+# id). Ids read off the links on any event page; stable across a season, but
+# NEW EVERY SEASON. Until 10-08 this was one flat list of 2026's ids with
+# nothing checking the year, so the first 2027 round would have painted 2026's
+# final points onto 2027's riders. Now a season missing here is not overlaid at
+# all (its computed standings stand, and scripts/audit.py says the ids are
+# missing), and fetch_standings refuses a page whose heading names another
+# season. Manufacturers are read by the API itself (_MFR_POINTS).
+CHAMPIONSHIPS = {2026: [
     ("MX", "450", 21),
     ("MX", "250", 22),
     ("MX", "WMX", 25),
@@ -48,7 +52,7 @@ CHAMPIONSHIPS = [
     # championship must go through the API, never through these rows.
     ("SMX", "450", 19),
     ("SMX", "250", 18),
-]
+]}
 
 
 def match_key(name: str) -> str:
@@ -109,14 +113,26 @@ def parse_series_points(html: str):
     return []
 
 
-def fetch_standings(series_points_id: int, event_id, timeout: int = 30):
+def page_title(html: str) -> str:
+    """The page's own heading, e.g. "2026 SX 450 Championship"."""
+    h = BeautifulSoup(html or "", "html.parser").find(["h1", "h2", "h3"])
+    return h.get_text(" ", strip=True) if h else ""
+
+
+def fetch_standings(series_points_id: int, event_id, season=None,
+                    timeout: int = 30):
     """One championship's official table. Returns [] rather than raising, so a
-    provider hiccup degrades to our computed standings instead of an outage."""
+    provider hiccup degrades to our computed standings instead of an outage.
+    With `season`, a page whose heading does not name that season is refused:
+    last year's table under this year's id is the wrong answer, not a stale
+    one."""
     try:
         resp = requests.get(
             _URL.format(sid=series_points_id, eid=event_id),
             headers=_UA, timeout=timeout)
         resp.raise_for_status()
+        if season is not None and str(season) not in page_title(resp.text):
+            return []
         return parse_series_points(resp.text)
     except Exception:
         return []

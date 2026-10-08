@@ -217,9 +217,15 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
 
     index = _rider_index(conn)
     report, total = {}, 0
+    # The season being overlaid. Only its own tables, onto its own rows: see
+    # CHAMPIONSHIPS for what happened when neither was checked.
+    year = datetime.date.today().year
+    if year not in CHAMPIONSHIPS:
+        return {"anchor": anchor, "applied": 0, "championships": {},
+                "missing_ids": year}
 
-    for abbrev, cls, sid in CHAMPIONSHIPS:
-        rows = fetch_standings(sid, anchor)
+    for abbrev, cls, sid in CHAMPIONSHIPS[year]:
+        rows = fetch_standings(sid, anchor, season=year)
         if not rows:
             report[f"{abbrev} {cls}"] = "unavailable"
             continue
@@ -236,11 +242,12 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
                     UPDATE standings st SET points = %s, position = %s
                     FROM seasons se, series s
                     WHERE st.season_id = se.id AND se.series_id = s.id
+                      AND se.year = %s
                       AND s.abbrev = %s AND st.class = %s AND st.rider_id = %s
                       AND (st.points IS DISTINCT FROM %s
                            OR st.position IS DISTINCT FROM %s)
                     """ + ("AND se.id = %s" if season_id is not None else ""),
-                    (r["points"], r["position"], abbrev, cls, rider_id,
+                    (r["points"], r["position"], year, abbrev, cls, rider_id,
                      r["points"], r["position"])
                     + ((season_id,) if season_id is not None else ()),
                 )
@@ -263,7 +270,7 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
                         ON CONFLICT (season_id, class, rider_id) DO NOTHING
                         """,
                         (cls, rider_id, r["points"], r["position"],
-                         abbrev, datetime.date.today().year),
+                         abbrev, year),
                     )
                     inserted += cur.rowcount
         conn.commit()

@@ -105,7 +105,22 @@ def test_different_riders_do_not_collide():
 def test_every_championship_maps_to_a_class_we_store():
     """A typo here would silently update nothing at all."""
     valid = {"450", "250", "250 East", "250 West", "WMX"}
-    for abbrev, cls, sid in CHAMPIONSHIPS:
-        assert abbrev in {"SX", "MX", "SMX"}
-        assert cls in valid
-        assert isinstance(sid, int)
+    for season, champs in CHAMPIONSHIPS.items():
+        assert isinstance(season, int) and season >= 2026
+        for abbrev, cls, sid in champs:
+            assert abbrev in {"SX", "MX", "SMX"}
+            assert cls in valid
+            assert isinstance(sid, int)
+
+
+def test_a_page_for_another_season_is_refused(monkeypatch):
+    """2026's ids would serve 2026's tables in 2027. The heading is the only
+    thing on the page that says which season it is, so it is checked."""
+    from src.adapters import official_standings as o
+
+    class R:
+        text = "<h2>2026 SX 450 Championship</h2>" + PAGE
+        def raise_for_status(self): pass
+    monkeypatch.setattr(o.requests, "get", lambda *a, **k: R())
+    assert o.fetch_standings(16, 1, season=2026)
+    assert o.fetch_standings(16, 1, season=2027) == []

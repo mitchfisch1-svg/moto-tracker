@@ -183,6 +183,10 @@ def _overlay_official(conn) -> None:
     """
     try:
         rep = apply_official_standings(conn)
+        if rep.get("missing_ids"):
+            log.warning("standings: no official table ids for %s — add them to "
+                        "CHAMPIONSHIPS in adapters/official_standings.py; "
+                        "computed standings stand until then", rep["missing_ids"])
         log.info("standings: official overlay anchored on event %s, %s row(s) corrected",
                  rep.get("anchor"), rep.get("applied"))
         for name, detail in (rep.get("championships") or {}).items():

@@ -41,7 +41,9 @@ load_dotenv(ROOT / ".env")
 from src.names import titlecase_name                    # noqa: E402
 from src.config import get_database_url  # noqa: E402
 from src.api.main import (                               # noqa: E402
-    _SMX_PLAYOFF_POINTS, _name_key, _overall_block_is_settled)
+    _MFR_POINTS, _SMX_PLAYOFF_POINTS, _WMX_SEASON, _name_key,
+    _overall_block_is_settled)
+from src.adapters.official_standings import CHAMPIONSHIPS  # noqa: E402
 
 API = os.environ.get("MXT_API", "https://moto-tracker-api.onrender.com")
 UA = {"User-Agent": "MotoTracker-audit/1.0"}
@@ -128,6 +130,34 @@ def _next_race_sane(cur, _http):
         """)
     return [f"{v} started {t:%m-%d %H:%M} and is still not final"
             for v, t in cur.fetchall()]
+
+
+@check("this season's official tables are known",
+       "2026's table ids, used unchecked in 2027, would have painted last "
+       "season's final points onto this season's riders")
+def _season_ids_known(cur, _http):
+    year = datetime.date.today().year
+    cur.execute(
+        """
+        SELECT DISTINCT s.abbrev FROM standings st
+        JOIN seasons se ON se.id = st.season_id
+        JOIN series  s  ON s.id  = se.series_id
+        WHERE se.year = %s
+        """, (year,))
+    started = {r[0] for r in cur.fetchall()}
+    if not started:
+        return []          # the season has not begun; nothing is using the ids
+    bad = []
+    if year not in CHAMPIONSHIPS:
+        bad.append(f"adapters/official_standings.py CHAMPIONSHIPS has no {year} "
+                   f"ids ({', '.join(sorted(started))} under way)")
+    missing = sorted(started - set(_MFR_POINTS.get(year) or {}))
+    if missing:
+        bad.append(f"api/main.py _MFR_POINTS has no {year} id for "
+                   + ", ".join(missing))
+    if "MX" in started and _WMX_SEASON != year:
+        bad.append(f"api/main.py _WMX_SEASON is {_WMX_SEASON}, not {year}")
+    return bad
 
 
 @check("every finished round has every points race the site lists",
