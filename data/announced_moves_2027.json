@@ -1,0 +1,37 @@
+{
+  "_about": "2027 rider moves ANNOUNCED by a team, manufacturer or the rider, checked 2026-10-08. Only confirmed moves are here: reports and rumours (Hampshire to Ducati, DiFrancesco to KTM, McAdoo to Honda, Stewart to Kawasaki, Thrasher's new team, a Tomac retirement) are deliberately left out until announced. Applied as source 'news' by scripts/apply_announced_moves.py; the series' entry lists (source 'entry_list') and results override it from January. Team names follow the spelling the series' own entry lists use, so teammates read the same.",
+  "season": 2027,
+  "moves": [
+    {"rider": "Cooper Webb", "class": "450", "team": "Team Tedder Husqvarna", "manufacturer": "Husqvarna",
+     "announced": "2026-10", "source": "https://www.cyclenews.com/2026/10/article/cooper-webb-joins-team-tedder-husqvarna/",
+     "note": "Multi-year deal; Husqvarna Mobility release. Leaves Star Racing Yamaha."},
+    {"rider": "Justin Hill", "class": "450", "team": "Team Tedder Husqvarna", "manufacturer": "Husqvarna",
+     "announced": "2026-10", "source": "https://www.totalmotorcycle.com/husqvarna-mobility-and-team-tedder-join-forces-for-2027-smx-season/",
+     "note": "Returning Team Tedder rider; the team moves to Husqvarna factory support (same release)."},
+    {"rider": "Aaron Plessinger", "class": "450", "team": "5.11 Triumph Racing Factory Team", "manufacturer": "Triumph",
+     "announced": "2026-09-30", "source": "https://www.triumphmotorcycles.com/for-the-ride/news/triumph-racing/511-triumph-factory-racing-welcomes-aaron-plessinger-2026-09-30",
+     "note": "Two-year deal, 2027-2028, TF 450-X. Leaves Red Bull KTM after five years."},
+    {"rider": "Justin Barcia", "class": "450", "team": "Pipes Motorsports Group Suzuki", "manufacturer": "Suzuki",
+     "announced": "2026-10-03", "source": "https://www.cyclenews.com/2026/10/article/barcia-joins-suzuki-and-pipes-motorsports-group-for-2027-smx/",
+     "note": "Suzuki Motor USA and team joint release; 2027 with a mutual option for 2028. Leaves TLD Red Bull Ducati."},
+    {"rider": "Lucas Coenen", "class": "450", "team": "Red Bull KTM Factory Racing", "manufacturer": "KTM",
+     "announced": "2026-08", "source": "https://www.ktm.com/en-us/racing/racing-news/coenen-brothers-to-make-supermotocross-transition-for-2027-after.html",
+     "note": "Multi-year deal; moves from MXGP to full-time AMA SuperMotocross, 450."},
+    {"rider": "Sacha Coenen", "class": "250", "team": "Red Bull KTM Factory Racing", "manufacturer": "KTM",
+     "announced": "2026-08", "source": "https://www.ktm.com/en-us/racing/racing-news/coenen-brothers-to-make-supermotocross-transition-for-2027-after.html",
+     "note": "Multi-year deal; moves from MXGP to full-time AMA SuperMotocross, 250."},
+    {"rider": "Shane McElrath", "class": "450", "team": "Liqui Moly Beta Factory Racing", "manufacturer": "Beta",
+     "announced": "2026-08", "source": "https://www.cyclenews.com/2026/08/article/supermotocross-silly-season-update/",
+     "note": "Two-year 450SX (Supercross-only) deal with Beta."},
+    {"rider": "Gage Linville", "class": "250", "team": "Liqui Moly Beta Factory Racing", "manufacturer": "Beta",
+     "announced": "2026-09-28", "source": "https://www.cyclenews.com/2026/09/article/beta-usa-signs-gage-linville/",
+     "note": "Two-year deal, factory 250SX team, RX 250F."},
+    {"rider": "Derek Kelley", "class": "250", "team": "Liqui Moly Beta Factory Racing", "manufacturer": "Beta",
+     "announced": "2026-09-28", "source": "https://www.totalmotorcycle.com/beta-usa-signs-gage-linville-to-factory-250sx-team/",
+     "note": "Joins Beta's factory 250SX effort alongside Linville (same release)."}
+  ],
+  "no_ride_announced": [
+    {"rider": "Colt Nichols", "note": "Not returning to Twisted Tea Suzuki (team post); Barcia takes the seat."},
+    {"rider": "Marshal Weltin", "note": "Retiring (rider's post)."}
+  ]
+}
