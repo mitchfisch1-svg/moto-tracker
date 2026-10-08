@@ -241,13 +241,15 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
                 # counted motocross MOTO wins (Hunter Lawrence 12 in an
                 # 11-round season; official 6). Not for SMX — 19/18 are the
                 # seeding tables, whose round cells are SX and MX rounds.
-                wins, pods = ((r.get("wins"), r.get("podiums"))
-                              if abbrev != "SMX" else (None, None))
+                wins, pods, fins = ((r.get("wins"), r.get("podiums"),
+                                     r.get("finishes"))
+                                    if abbrev != "SMX" else (None, None, None))
                 cur.execute(
                     """
                     UPDATE standings st SET points = %s, position = %s,
                            wins = COALESCE(%s, st.wins),
-                           podiums = COALESCE(%s, st.podiums)
+                           podiums = COALESCE(%s, st.podiums),
+                           round_finishes = COALESCE(%s::int[], st.round_finishes)
                     FROM seasons se, series s
                     WHERE st.season_id = se.id AND se.series_id = s.id
                       AND se.year = %s
@@ -255,11 +257,13 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
                       AND (st.points IS DISTINCT FROM %s
                            OR st.position IS DISTINCT FROM %s
                            OR st.wins IS DISTINCT FROM COALESCE(%s, st.wins)
-                           OR st.podiums IS DISTINCT FROM COALESCE(%s, st.podiums))
+                           OR st.podiums IS DISTINCT FROM COALESCE(%s, st.podiums)
+                           OR st.round_finishes IS DISTINCT FROM
+                              COALESCE(%s::int[], st.round_finishes))
                     """ + ("AND se.id = %s" if season_id is not None else ""),
-                    (r["points"], r["position"], wins, pods,
+                    (r["points"], r["position"], wins, pods, fins,
                      year, abbrev, cls, rider_id,
-                     r["points"], r["position"], wins, pods)
+                     r["points"], r["position"], wins, pods, fins)
                     + ((season_id,) if season_id is not None else ()),
                 )
                 changed += cur.rowcount
@@ -275,15 +279,15 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
                         """
                         INSERT INTO standings
                                (season_id, class, rider_id, points, position,
-                                wins, podiums)
+                                wins, podiums, round_finishes)
                         SELECT se.id, %s, %s, %s, %s,
-                               COALESCE(%s, 0), COALESCE(%s, 0)
+                               COALESCE(%s, 0), COALESCE(%s, 0), %s::int[]
                         FROM seasons se JOIN series s ON s.id = se.series_id
                         WHERE s.abbrev = %s AND se.year = %s
                         ON CONFLICT (season_id, class, rider_id) DO NOTHING
                         """,
                         (cls, rider_id, r["points"], r["position"],
-                         wins, pods, abbrev, year),
+                         wins, pods, fins, abbrev, year),
                     )
                     inserted += cur.rowcount
         conn.commit()

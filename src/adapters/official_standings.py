@@ -78,8 +78,8 @@ _FINISH_RE = re.compile(r"^(\d+)(st|nd|rd|th)$", re.I)
 
 
 def parse_series_points(html: str):
-    """Rows of {position, rider, points, adjustment, wins, podiums} from a
-    standings page.
+    """Rows of {position, rider, points, adjustment, wins, podiums, finishes}
+    from a standings page.
 
     Pure, so it can be tested without the network. Columns are located by their
     header rather than by index — the provider varies the leading columns
@@ -135,6 +135,7 @@ def parse_series_points(html: str):
             f = r.pop("_finishes")
             r["wins"] = sum(1 for x in f if x == 1) if known else None
             r["podiums"] = sum(1 for x in f if x <= 3) if known else None
+            r["finishes"] = f if known else None     # each round's finish
         if out:
             return out
     return []

@@ -194,6 +194,10 @@ ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_url TEXT;
 -- were big enough that a cold launch showed number plates instead of faces.
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_override TEXT;
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_racerx TEXT;
+-- Each round's official finish (the series-points table), for a rider's
+-- season line: rounds, best and average ROUND finish. Written by
+-- apply_official_standings; null until it has run.
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS round_finishes INTEGER[];
 -- Last-Modified of the Feld image + when we last asked, so audit_headshots.py
 -- can flag riders whose photo predates their team change (= last season's kit).
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_source_mtime TIMESTAMPTZ;

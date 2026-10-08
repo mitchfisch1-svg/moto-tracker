@@ -1133,7 +1133,8 @@ def rider(rider_id: int):
     standings_rows = query(
         """
         SELECT s.abbrev AS series, st.class, st.position, st.points,
-               st.wins, st.podiums, lead.max_points - st.points AS gap
+               st.wins, st.podiums, lead.max_points - st.points AS gap,
+               se.year, st.round_finishes
         FROM standings st
         JOIN seasons se ON se.id = st.season_id
         JOIN series  s  ON s.id  = se.series_id
@@ -1143,18 +1144,6 @@ def rider(rider_id: int):
         ) lead ON lead.season_id = st.season_id AND lead.class = st.class
         WHERE st.rider_id = %s
         ORDER BY s.id, st.class
-        """,
-        [rider_id],
-    )
-    stats = query(
-        """
-        SELECT count(*)                                        AS races,
-               MIN(position)                                   AS best_finish,
-               ROUND(AVG(position)::numeric, 1)                AS avg_finish,
-               COUNT(*) FILTER (WHERE position = 1)            AS wins,
-               COUNT(*) FILTER (WHERE position <= 3)           AS podiums,
-               COUNT(*) FILTER (WHERE status IN ('dnf','dns','dsq')) AS dnfs
-        FROM results WHERE rider_id = %s
         """,
         [rider_id],
     )
@@ -1181,12 +1170,60 @@ def rider(rider_id: int):
     # WMX points live on the series-points page, not in our standings table, so
     # a WMX rider would otherwise show no championship at all — and the app
     # gates its "Compare head-to-head" button on having one.
-    standings_rows = standings_rows + _wmx_standing_lines(rider_id)
+    wmx = _wmx_standing_lines(rider_id)
+    if wmx:   # the overlay also files WMX in `standings`: one line, not two
+        standings_rows = [r for r in standings_rows if r["class"] != "WMX"]
+    standings_rows = standings_rows + wmx
+    # One season on the page: the rider's latest. Without this, January would
+    # list 2026's championships beside 2027's with nothing telling them apart.
+    year = max((r["year"] for r in standings_rows if r.get("year")), default=None)
+    standings_rows = [r for r in standings_rows if r.get("year") == year]
+    races = query(
+        """
+        SELECT count(DISTINCT sess.event_id) AS rounds,
+               count(*) FILTER (WHERE r.status IN ('dnf','dns','dsq')) AS dnfs
+        FROM results r
+        JOIN sessions sess ON sess.id = r.session_id
+        JOIN events   e    ON e.id    = sess.event_id
+        JOIN seasons  se   ON se.id   = e.season_id
+        WHERE r.rider_id = %s AND se.year = %s
+        """,
+        [rider_id, year],
+    ) if year else []
     return {
         "rider": info[0],
-        "season_stats": stats[0] if stats else None,
-        "standings": standings_rows,
+        "season_stats": _season_line(standings_rows, races[0] if races else None,
+                                     year),
+        "standings": [{k: v for k, v in r.items() if k != "round_finishes"}
+                      for r in standings_rows],
         "recent_results": recent,
+    }
+
+
+def _season_line(rows, races, year):
+    """A rider's season in ROUNDS, built from the championship rows shown under
+    it so the two can never disagree. It used to count every main and moto:
+    Hunter Lawrence's 2026 read 18 wins over championships saying 5 + 6 + 0.
+
+    Best/avg are round finishes off the official tables (None until the
+    overlay has stored them); DNFs stay per race — a DNF is a race event.
+    """
+    if not rows or year is None:
+        return None
+    fins = [f for r in rows for f in (r.get("round_finishes") or [])]
+    known = all(r.get("round_finishes") is not None for r in rows)
+    # Championship rounds, like the wins beside them (Lachlan Turner's WMX
+    # race at the SMX final is a round she rode, not one the title counted).
+    rounds = len(fins) if known else ((races or {}).get("rounds") or 0)
+    return {
+        "year": year,
+        "rounds": rounds,
+        "races": rounds,                    # what app builds < 1.7.0 read
+        "wins": sum(r.get("wins") or 0 for r in rows),
+        "podiums": sum(r.get("podiums") or 0 for r in rows),
+        "best_finish": min(fins) if fins and known else None,
+        "avg_finish": round(sum(fins) / len(fins), 1) if fins and known else None,
+        "dnfs": (races or {}).get("dnfs") or 0,
     }
 
 
@@ -2424,6 +2461,7 @@ def _parse_series_points(html: str, klass: str):
             "points": int(cells[pts_i]) if cells[pts_i].lstrip("-").isdigit() else 0,
             "wins": sum(1 for f in finishes if f == "1st"),
             "podiums": sum(1 for f in finishes if f in ("1st", "2nd", "3rd")),
+            "finishes": [int(f[:-2]) for f in finishes],
         })
     leader = rows[0]["points"] if rows else 0
     for r in rows:
@@ -2510,6 +2548,7 @@ def _wmx_standing_lines(rider_id: int) -> list[dict]:
         "series": "MX", "class": "WMX", "position": row.get("position"),
         "points": row.get("points"), "wins": row.get("wins"),
         "podiums": row.get("podiums"), "gap": row.get("gap"),
+        "year": _WMX_SEASON, "round_finishes": row.get("finishes"),
     }]
 
 
@@ -2675,7 +2714,8 @@ def _smx_standing_lines(rider_id: int) -> list[dict]:
         return []
     return [{"series": "SMX", "class": r["class"], "position": r["position"],
              "points": r["points"], "wins": r["wins"],
-             "podiums": r["podiums"], "gap": r["gap"]}
+             "podiums": r["podiums"], "gap": r["gap"],
+             "year": _current_year(), "round_finishes": r.get("finishes")}
             for r in rows if r.get("rider_id") == rider_id]
 
 
