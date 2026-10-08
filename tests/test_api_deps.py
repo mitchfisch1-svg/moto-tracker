@@ -32,7 +32,7 @@ API_REQUIREMENTS = {
 }
 # Ours, and each one must stay free of scraper dependencies.
 OUR_SLIM_MODULES = {"names", "config", "notify", "mockrace", "sessions",
-                    "db", "standings"}
+                    "db", "standings", "makes"}
 
 
 def imported_modules(path):
@@ -63,6 +63,11 @@ def test_sessions_is_safe_for_the_api_to_import():
     # The whole reason it exists. If this grows a dependency, the API breaks.
     mods = imported_modules(ROOT / "src" / "sessions.py")
     assert mods <= {"re"}, f"src/sessions.py must stay stdlib-only, imports {mods}"
+
+
+def test_makes_is_safe_for_the_api_to_import():
+    mods = imported_modules(ROOT / "src" / "makes.py")
+    assert mods <= {"re"}, f"src/makes.py must stay stdlib-only, imports {mods}"
 
 
 def test_every_third_party_import_in_the_api_is_installed_there():

@@ -29,6 +29,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
+from ..makes import bike_in_cell
 from ..names import fold, titlecase_name
 from ..config import get_database_url
 from ..notify import notify_work
@@ -778,7 +779,8 @@ def standings(
                -- their latest team: riders move over the winter.
                COALESCE(rs.number, r.number) AS number,
                COALESCE(rs.team, r.team) AS team,
-               COALESCE(rs.manufacturer, r.manufacturer) AS manufacturer,
+               -- The bike the official table lists them on wins over both.
+               COALESCE(st.bike, rs.manufacturer, r.manufacturer) AS manufacturer,
                COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url,
                st.points, st.wins,
                st.podiums
@@ -2435,11 +2437,12 @@ def _parse_series_points(html: str, klass: str):
         return title, None
 
     pts_i = header.index("POINTS")
+    bike_i = header.index("BIKE") if "BIKE" in header else None
     round_idx = [i for i, h in enumerate(header) if _ROUND_COL_RE.match(h)]
     rows = []
     for tr in table.find_all("tr"):
-        cells = [c.get_text(" ", strip=True)
-                 for c in tr.find_all(["th", "td"], recursive=False)]
+        tds = tr.find_all(["th", "td"], recursive=False)
+        cells = [c.get_text(" ", strip=True) for c in tds]
         if len(cells) <= pts_i or not (cells[0] or "").isdigit():
             continue
         # Each round cell reads "<round pts> <overall finish> <moto lines…>";
@@ -2456,7 +2459,9 @@ def _parse_series_points(html: str, klass: str):
             "full_name": (cells[3] or "").strip(),
             "number": (cells[1] or "").strip() or None,
             "team": None,
-            "manufacturer": None,
+            # The bike the championship lists them on (see src/makes.py).
+            "manufacturer": (bike_in_cell(tds[bike_i])
+                             if bike_i is not None and bike_i < len(tds) else None),
             "headshot_url": None,
             "points": int(cells[pts_i]) if cells[pts_i].lstrip("-").isdigit() else 0,
             "wins": sum(1 for f in finishes if f == "1st"),
@@ -2509,7 +2514,7 @@ def _wmx_standings():
                 if m:
                     r["rider_id"] = m["id"]
                     r["team"] = m["team"]
-                    r["manufacturer"] = m["manufacturer"]
+                    r["manufacturer"] = r["manufacturer"] or m["manufacturer"]
                     r["headshot_url"] = m["headshot_url"]
         except Exception:
             pass   # enrichment is best-effort; official points still serve
@@ -2629,7 +2634,7 @@ def _attach_riders(rows, year):
             continue
         taken.add(m["id"])
         r.update(rider_id=m["id"], team=m["team"],
-                 manufacturer=m["manufacturer"],
+                 manufacturer=r.get("manufacturer") or m["manufacturer"],
                  headshot_url=m["headshot_url"], hometown=m["hometown"])
     return rows
 

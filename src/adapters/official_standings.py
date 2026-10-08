@@ -23,6 +23,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
+from ..makes import bike_in_cell
 from ..names import fold
 
 RESULTS_HOME = "https://results.supermotocross.com/results/"
@@ -78,8 +79,8 @@ _FINISH_RE = re.compile(r"^(\d+)(st|nd|rd|th)$", re.I)
 
 
 def parse_series_points(html: str):
-    """Rows of {position, rider, points, adjustment, wins, podiums, finishes}
-    from a standings page.
+    """Rows of {position, rider, points, adjustment, wins, podiums, finishes,
+    bike} from a standings page.
 
     Pure, so it can be tested without the network. Columns are located by their
     header rather than by index — the provider varies the leading columns
@@ -103,6 +104,7 @@ def parse_series_points(html: str):
         ri, pi = header.index("RIDER"), header.index("POINTS")
         ai = header.index("POINT ADJUSTMENTS") if "POINT ADJUSTMENTS" in header else None
         round_idx = [i for i, h in enumerate(header) if _ROUND_COL_RE.match(h)]
+        bi = header.index("BIKE") if "BIKE" in header else None
         out = []
         for tr in rows[1:]:
             cells = [c.get_text(strip=True) for c in tr.find_all("td")]
@@ -123,6 +125,7 @@ def parse_series_points(html: str):
                     finishes.append(int(m.group(1)))
             out.append({
                 "_finishes": finishes,
+                "bike": bike_in_cell(tds[bi]) if bi is not None and bi < len(tds) else None,
                 "position": _cell_int(cells[0]) if cells else None,
                 "rider": name,
                 "points": points,

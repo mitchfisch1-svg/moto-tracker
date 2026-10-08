@@ -198,6 +198,8 @@ ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_racerx TEXT;
 -- season line: rounds, best and average ROUND finish. Written by
 -- apply_official_standings; null until it has run.
 ALTER TABLE standings ADD COLUMN IF NOT EXISTS round_finishes INTEGER[];
+-- The bike the official table lists the rider on, for that championship.
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS bike TEXT;
 -- Last-Modified of the Feld image + when we last asked, so audit_headshots.py
 -- can flag riders whose photo predates their team change (= last season's kit).
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_source_mtime TIMESTAMPTZ;

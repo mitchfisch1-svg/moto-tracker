@@ -367,9 +367,9 @@ def _smx_is_the_playoffs(_cur, http):
     return bad
 
 
-@check("SX and MX standings match the official tables, wins and podiums too",
-       "every MX championship counted MOTO wins: Hunter Lawrence 12 wins in "
-       "an 11-round season (official 6), Jett 17 podiums (official 9)")
+@check("SX and MX standings match the official tables: points, wins, podiums, bikes",
+       "every MX championship counted MOTO wins (Hunter Lawrence 12 in "
+       "an 11-round season, official 6), and 2026 tables showed 2027 bikes")
 def _standings_match_official(cur, http):
     from src.adapters.official_standings import fetch_standings, match_key
     year = datetime.date.today().year
@@ -412,6 +412,9 @@ def _standings_match_official(cur, http):
             if want != got:
                 bad.append(f"{abbrev} {cls} {s['rider']}: official {want}, "
                            f"we serve {got} (pts, W, P)")
+            if s.get("bike") and o.get("manufacturer") != s["bike"]:
+                bad.append(f"{abbrev} {cls} {s['rider']}: official bike "
+                           f"{s['bike']}, we show {o.get('manufacturer')}")
     return bad
 
 

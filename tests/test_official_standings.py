@@ -161,3 +161,25 @@ def test_wins_and_podiums_are_round_finishes_not_motos():
 def test_a_page_without_round_columns_has_no_wins():
     """None, not 0: an overlay must not zero a count it was never told."""
     assert parse_series_points(PAGE)[0]["wins"] is None
+
+
+def test_the_bike_is_read_off_the_official_logo():
+    """Justin Hill raced 2026 on a KTM; his announced 2027 Husqvarna was being
+    shown on 2026's standings."""
+    page = ROUND_PAGE.replace(
+        "<td>HON</td><td>Hunter Lawrence",
+        '<td><div class="manufacturer"><img src="https://assets.liveracemedia.com'
+        '/manufacturers/primary/ktm.png"/></div></td><td>Hunter Lawrence', 1)
+    rows = parse_series_points(page)
+    assert rows[0]["bike"] == "KTM"
+    assert rows[1]["bike"] is None          # text, not a logo: unknown
+
+
+def test_logo_slugs_map_to_the_apps_make_names():
+    from src.makes import bike_from_logo
+    base = "https://assets.liveracemedia.com/manufacturers/primary/"
+    assert bike_from_logo(base + "gasgas.png") == "GasGas"
+    assert bike_from_logo(base + "husqvarna.png") == "Husqvarna"
+    assert bike_from_logo(base + "ktm.png") == "KTM"
+    assert bike_from_logo(base + "fantic.png") == "Fantic"
+    assert bike_from_logo("https://example.com/logo.png") is None
