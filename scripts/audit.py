@@ -130,6 +130,35 @@ def _next_race_sane(cur, _http):
             for v, t in cur.fetchall()]
 
 
+@check("every finished round has every points race the site lists",
+       "the final went twelve days without 450 Moto 2, the race that decided "
+       "the title, and LA five days without either Moto 2")
+def _rounds_complete(cur, http):
+    if not http:
+        return []
+    from src.adapters.results_html import ResultsHTMLAdapter
+    cur.execute(
+        """
+        SELECT e.id, e.venue, e.source_url,
+               count(s.id) FILTER (WHERE s.type IN ('main', 'moto'))
+        FROM events e LEFT JOIN sessions s ON s.event_id = e.id
+        WHERE e.status = 'final' AND e.event_date >= current_date - 21
+          AND e.source_url LIKE '%%view_event%%'
+        GROUP BY e.id, e.venue, e.source_url
+        """)
+    adapter, bad = ResultsHTMLAdapter(), []
+    for eid, venue, url, stored in cur.fetchall():
+        m = re.search(r"[?&]id=(\d+)", url or "")
+        if not m:
+            continue
+        races = adapter.list_points_races(m.group(1))
+        listed = [r for r in races if r[3] in ("main", "moto")]
+        if len(listed) > stored:
+            bad.append(f"{venue} (event {eid}): {stored} of {len(listed)} "
+                       "points races stored")
+    return bad
+
+
 @check("a championship the series publishes has rows",
        "the SMX tab read No standings yet while the official table existed")
 def _standings_present(cur, _http):

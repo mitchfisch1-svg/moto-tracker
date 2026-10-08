@@ -113,10 +113,42 @@ def _catch_up_missed_rounds(conn):
             """
         )
         missed = {row[0] for row in cur.fetchall()}
+        # Rounds with SOME results but not all. /live retires a round the
+        # moment its last race ends, before that race's results are posted, so
+        # a round ingested between motos was never revisited: Los Angeles sat
+        # on Moto 1 alone for five days, and the final went a fortnight without
+        # 450 Moto 2, the race that decided the title. Compare what the site
+        # lists with what we stored, for anything that finished recently.
+        cur.execute(
+            """
+            SELECT e.id, count(s.id) FILTER (WHERE s.type IN ('main', 'moto'))
+            FROM events e LEFT JOIN sessions s ON s.event_id = e.id
+            WHERE e.status = 'final' AND e.event_date >= current_date - 3
+            GROUP BY e.id
+            """
+        )
+        recent = {eid: n for eid, n in cur.fetchall() if eid not in missed}
+    if recent:
+        adapter = ResultsHTMLAdapter()
+        for ev in select_events(conn, target_status="final"):
+            stored = recent.get(ev["event_id"])
+            if stored is None:
+                continue
+            try:
+                listed = sum(1 for r in adapter.list_points_races(ev["smx_id"])
+                             if r[3] in ("main", "moto"))
+            except Exception:
+                log.exception("results: could not list races for event %s",
+                              ev["event_id"])
+                continue
+            if listed > stored:
+                log.warning("results: event %s has %s of %s points races — "
+                            "catching up", ev["event_id"], stored, listed)
+                missed.add(ev["event_id"])
     if not missed:
         return
 
-    log.warning("results: %s recent final round(s) have NO results — catching up",
+    log.warning("results: %s recent final round(s) are missing results — catching up",
                 len(missed))
     # A round with no results id can only be recovered while it's still the
     # current event on the results homepage; one that already has an id can be
