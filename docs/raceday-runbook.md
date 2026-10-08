@@ -12,15 +12,20 @@ API  = https://moto-tracker-api.onrender.com
 
 ## 0 · Before the season (once, by early January)
 
-The official tables have NEW ids every season. Until they are added, the
-hourly audit fails (and pushes to your phone) — that is the reminder.
+The official tables have NEW ids every season. Nothing to type in any more:
+the hourly results job reads each new table's heading ("2027 SX 450
+Championship") and files it (`src/series_tables.py`). Supercross's tables are
+due with A1, motocross's with round 1, WMX's once WMX races, the playoff
+tables with the playoffs.
 
-- [ ] `src/adapters/official_standings.py` → `CHAMPIONSHIPS[2027]`: SX 450 /
-  250 West / 250 East, then MX 450 / 250 / WMX, then SMX. Read the ids off the
-  links on any 2027 event page (`?p=view_series_points&id=…`).
-- [ ] `src/api/main.py` → `_MFR_POINTS[2027]` (manufacturers), `_WMX_SEASON`,
-  and in September `_SMX_PLAYOFF_POINTS[2027]`.
-- [ ] `python scripts/audit.py` → every invariant holds.
+- [ ] Two days after A1: `python scripts/audit.py` → every invariant holds.
+  If it says **"no 2027 X table found yet"**, open
+  `results.supermotocross.com/results/?p=view_series_points&id=N` for the
+  ids just above last season's and read the heading. Either the provider
+  worded it in a way the classifier refuses (on purpose: any word it doesn't
+  know leaves a table unfiled rather than misfiled) — teach `classify()` the
+  wording, or add the id to `SEED` by hand — or the table isn't posted yet.
+  **"two tables claim …"** means pick the real one and put it in `SEED`.
 - [ ] 1.7.0 is on the App Store and people have updated (1.6.x still has the
   old lock-screen code, which now gets no pushes).
 

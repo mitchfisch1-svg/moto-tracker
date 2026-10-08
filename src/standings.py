@@ -194,7 +194,8 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
     is correct to within an adjustment. Standings going stale beats standings
     going blank.
     """
-    from .adapters.official_standings import CHAMPIONSHIPS, fetch_standings, match_key
+    from .adapters.official_standings import fetch_standings, match_key
+    from . import series_tables
 
     with conn.cursor() as cur:
         # Any recent event anchors the page; the provider returns the whole
@@ -217,14 +218,18 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
 
     index = _rider_index(conn)
     report, total = {}, 0
-    # The season being overlaid. Only its own tables, onto its own rows: see
-    # CHAMPIONSHIPS for what happened when neither was checked.
+    # The season being overlaid. Only its own tables, onto its own rows: a flat
+    # list of 2026's ids would have painted 2026's final points onto 2027's
+    # riders. The ids come from series_tables, which the scheduler keeps up to
+    # date by reading each new table's heading (on its own connection: it
+    # commits, and this one may be holding a half-written ingest).
     year = datetime.date.today().year
-    if year not in CHAMPIONSHIPS:
+    champs = series_tables.championships(year, series_tables.load(conn))
+    if not champs:
         return {"anchor": anchor, "applied": 0, "championships": {},
                 "missing_ids": year}
 
-    for abbrev, cls, sid in CHAMPIONSHIPS[year]:
+    for abbrev, cls, sid in champs:
         rows = fetch_standings(sid, anchor, season=year)
         if not rows:
             report[f"{abbrev} {cls}"] = "unavailable"

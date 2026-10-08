@@ -28,6 +28,7 @@ from .db import get_connection
 from .notify import notify_work
 from .pipeline.run_results import resolve_missing_event_ids, select_events
 from .pipeline import sync_entry_lists, watch_moves
+from . import series_tables
 from .standings import apply_official_standings, recompute_standings
 
 logging.basicConfig(
@@ -185,9 +186,9 @@ def _overlay_official(conn) -> None:
     try:
         rep = apply_official_standings(conn)
         if rep.get("missing_ids"):
-            log.warning("standings: no official table ids for %s — add them to "
-                        "CHAMPIONSHIPS in adapters/official_standings.py; "
-                        "computed standings stand until then", rep["missing_ids"])
+            log.warning("standings: no official tables found yet for %s "
+                        "(src/series_tables.py looks hourly); computed "
+                        "standings stand until then", rep["missing_ids"])
         log.info("standings: official overlay anchored on event %s, %s row(s) corrected",
                  rep.get("anchor"), rep.get("applied"))
         for name, detail in (rep.get("championships") or {}).items():
@@ -200,7 +201,21 @@ def _overlay_official(conn) -> None:
         log.exception("standings: official overlay failed; keeping computed figures")
 
 
+def _discover_tables() -> list:
+    """A new season's championship tables, which the provider numbers afresh
+    every year (src/series_tables.py). Its own connection: discovery commits,
+    and the results connection may be holding a round mid-ingest. Nothing is
+    fetched unless a stage that has started is missing a table."""
+    try:
+        with get_connection() as conn:
+            return series_tables.refresh(conn)
+    except Exception:
+        log.exception("standings: table discovery failed; will retry")
+        return []
+
+
 def results_work():
+    found = _discover_tables()
     with get_connection() as conn:
         live = update_event_statuses(conn)
         if not live:
@@ -216,6 +231,10 @@ def results_work():
                     log.info("entries: %s rider-season row(s) from entry lists", n)
             except Exception:
                 log.exception("entries: entry-list sync failed; will retry next run")
+            # A championship table found this run: check the standings against
+            # it now rather than waiting for the next round.
+            if found:
+                _overlay_official(conn)
             # And the news: signings two outlets agree on go in; anything less
             # waits for a person. Database only, so cheap every hour.
             try:

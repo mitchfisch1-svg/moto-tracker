@@ -31,29 +31,9 @@ _URL = RESULTS_HOME + "?p=view_series_points&id={sid}&event_id={eid}"
 _UA = {"User-Agent": "Mozilla/5.0 (compatible; MotoTracker/1.0; "
                      "+https://motoxtracker.com)"}
 
-# Per season: (series abbrev, our standings class, the provider's series-points
-# id). Ids read off the links on any event page; stable across a season, but
-# NEW EVERY SEASON. Until 10-08 this was one flat list of 2026's ids with
-# nothing checking the year, so the first 2027 round would have painted 2026's
-# final points onto 2027's riders. Now a season missing here is not overlaid at
-# all (its computed standings stand, and scripts/audit.py says the ids are
-# missing), and fetch_standings refuses a page whose heading names another
-# season. Manufacturers are read by the API itself (_MFR_POINTS).
-CHAMPIONSHIPS = {2026: [
-    ("MX", "450", 21),
-    ("MX", "250", 22),
-    ("MX", "WMX", 25),
-    ("SX", "450", 16),
-    ("SX", "250 West", 14),
-    ("SX", "250 East", 15),
-    # ⚠️ NOT the SMX championship. 19/18 are the "SMX Combined Championship":
-    # season-long SX + MX points that only SEED the playoffs. The title is the
-    # "SMX Playoffs" tables (30/31 in 2026), which the API reads itself — see
-    # _SMX_PLAYOFF_POINTS in api/main.py. Anything that shows an SMX
-    # championship must go through the API, never through these rows.
-    ("SMX", "450", 19),
-    ("SMX", "250", 18),
-]}
+# Which table id is which championship, per season, lives in src/series_tables.py:
+# found by each table's own heading, with 2026's hand-checked ids as a seed.
+# fetch_standings still refuses a page whose heading names another season.
 
 
 def match_key(name: str) -> str:

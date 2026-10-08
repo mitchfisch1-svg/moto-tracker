@@ -41,9 +41,8 @@ load_dotenv(ROOT / ".env")
 from src.names import titlecase_name                    # noqa: E402
 from src.config import get_database_url  # noqa: E402
 from src.api.main import (                               # noqa: E402
-    _MFR_POINTS, _SMX_PLAYOFF_POINTS, _WMX_SEASON, _name_key,
-    _overall_block_is_settled)
-from src.adapters.official_standings import CHAMPIONSHIPS  # noqa: E402
+    _name_key, _overall_block_is_settled)
+from src import series_tables                            # noqa: E402
 
 API = os.environ.get("MXT_API", "https://moto-tracker-api.onrender.com")
 UA = {"User-Agent": "MotoTracker-audit/1.0"}
@@ -132,31 +131,62 @@ def _next_race_sane(cur, _http):
             for v, t in cur.fetchall()]
 
 
-@check("this season's official tables are known",
-       "2026's table ids, used unchecked in 2027, would have painted last "
-       "season's final points onto this season's riders")
-def _season_ids_known(cur, _http):
-    year = datetime.date.today().year
+def _found_tables(cur):
+    cur.execute("SELECT payload FROM scraped_session_cache WHERE cache_key = %s",
+                (series_tables.CACHE_KEY,))
+    row = cur.fetchone()
+    return (row[0] if row else None) or {}
+
+
+def _settled_stages(cur, year):
+    """The stages of `year` with a round final two days ago — 'SX', 'MX',
+    'SMX', and 'WMX' once WMX has raced. The provider may post a season's
+    tables on race night and discovery looks hourly; before this, a missing
+    table is expected, not a fault."""
     cur.execute(
         """
-        SELECT DISTINCT s.abbrev FROM standings st
-        JOIN seasons se ON se.id = st.season_id
+        SELECT DISTINCT s.abbrev FROM events e
+        JOIN seasons se ON se.id = e.season_id
         JOIN series  s  ON s.id  = se.series_id
-        WHERE se.year = %s
+        WHERE se.year = %s AND e.status = 'final'
+          AND e.event_date <= current_date - 2
         """, (year,))
-    started = {r[0] for r in cur.fetchall()}
-    if not started:
-        return []          # the season has not begun; nothing is using the ids
-    bad = []
-    if year not in CHAMPIONSHIPS:
-        bad.append(f"adapters/official_standings.py CHAMPIONSHIPS has no {year} "
-                   f"ids ({', '.join(sorted(started))} under way)")
-    missing = sorted(started - set(_MFR_POINTS.get(year) or {}))
-    if missing:
-        bad.append(f"api/main.py _MFR_POINTS has no {year} id for "
-                   + ", ".join(missing))
-    if "MX" in started and _WMX_SEASON != year:
-        bad.append(f"api/main.py _WMX_SEASON is {_WMX_SEASON}, not {year}")
+    out = {r[0] for r in cur.fetchall()}
+    cur.execute(
+        """
+        SELECT 1 FROM sessions sess
+        JOIN events  e  ON e.id  = sess.event_id
+        JOIN seasons se ON se.id = e.season_id
+        WHERE se.year = %s AND sess.class = 'WMX' AND e.status = 'final'
+          AND e.event_date <= current_date - 2
+        LIMIT 1
+        """, (year,))
+    if cur.fetchone():
+        out.add("WMX")
+    return out
+
+
+@check("this season's official tables have been found",
+       "2026's table ids, used unchecked in 2027, would have painted last "
+       "season's final points onto this season's riders; then every new "
+       "season needed its ids typed in by hand")
+def _season_ids_known(cur, _http):
+    year = datetime.date.today().year
+    found = _found_tables(cur)
+    started = _settled_stages(cur, year)
+    have = series_tables.tables(year, found)
+    bad = [f"no {year} {k} table found yet (src/series_tables.py looks hourly; "
+           "check the provider's headings)"
+           for k in series_tables.needed(started) if k not in have]
+    for c in found.get("conflicts") or []:
+        bad.append(f"two tables claim {c['year']} {c['key']}: ids {c['ids']}")
+    # Where a person checked the ids by hand, discovery must agree with them,
+    # or the classifier is filing tables under the wrong championship.
+    for y, seeded in series_tables.SEED.items():
+        disc = ((found.get("tables") or {}).get(str(y)) or {})
+        for k, i in disc.items():
+            if k in seeded and int(i) != seeded[k]:
+                bad.append(f"discovery filed id {i} as {y} {k}; it is {seeded[k]}")
     return bad
 
 
@@ -315,11 +345,13 @@ def _smx_is_the_playoffs(_cur, http):
     # Checked against supermotocross.com's own page, not the provider table
     # the API reads — two official surfaces agreeing is the point.
     today = datetime.date.today()
-    if today.year not in _SMX_PLAYOFF_POINTS:
-        # The playoffs run in September. A season with no ids by then means
-        # the SMX tab has quietly gone back to serving the seeding.
-        return ([f"api/main.py _SMX_PLAYOFF_POINTS has no {today.year} "
-                 "playoff table ids"] if today.month >= 9 else [])
+    if not series_tables.smx_playoff_ids(today.year, _found_tables(_cur)):
+        # Once a playoff round is two days final, no tables means the SMX tab
+        # has quietly gone back to serving the seeding. Before that (it was
+        # "from September" — a week of alarms before the first playoff
+        # round) it is just early. _season_ids_known names what is missing.
+        return ([f"no {today.year} SMX playoff tables found (src/series_tables.py)"]
+                if "SMX" in _settled_stages(_cur, today.year) else [])
     if not http:
         return []
     bad = []
@@ -373,8 +405,9 @@ def _smx_is_the_playoffs(_cur, http):
 def _standings_match_official(cur, http):
     from src.adapters.official_standings import fetch_standings, match_key
     year = datetime.date.today().year
-    if not http or year not in CHAMPIONSHIPS:
-        return []          # missing ids are _season_ids_known's failure
+    champs = series_tables.championships(year, _found_tables(cur))
+    if not http or not champs:
+        return []          # missing tables are _season_ids_known's failure
     cur.execute("SELECT e.source_url FROM events e JOIN seasons se "
                 "ON se.id = e.season_id WHERE se.year = %s AND e.status = 'final' "
                 "AND e.source_url LIKE '%%view_event%%' "
@@ -385,7 +418,7 @@ def _standings_match_official(cur, http):
         return []          # nothing raced yet this season
     served = {}
     bad = []
-    for abbrev, cls, sid in CHAMPIONSHIPS[year]:
+    for abbrev, cls, sid in champs:
         if abbrev == "SMX":
             continue       # the playoffs have their own check above
         if abbrev not in served:

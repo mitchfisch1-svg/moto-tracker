@@ -19,7 +19,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.adapters.official_standings import (  # noqa: E402
-    CHAMPIONSHIPS,
     match_key,
     parse_series_points,
 )
@@ -104,9 +103,11 @@ def test_different_riders_do_not_collide():
 
 def test_every_championship_maps_to_a_class_we_store():
     """A typo here would silently update nothing at all."""
+    from src.series_tables import SEED, championships
     valid = {"450", "250", "250 East", "250 West", "WMX"}
-    for season, champs in CHAMPIONSHIPS.items():
-        assert isinstance(season, int) and season >= 2026
+    for season in SEED:
+        champs = championships(season)
+        assert len(champs) == 8
         for abbrev, cls, sid in champs:
             assert abbrev in {"SX", "MX", "SMX"}
             assert cls in valid

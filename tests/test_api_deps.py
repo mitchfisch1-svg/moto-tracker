@@ -31,7 +31,7 @@ API_REQUIREMENTS = {
     "starlette",         # ditto
 }
 # Ours, and each one must stay free of scraper dependencies.
-OUR_SLIM_MODULES = {"names", "config", "notify", "mockrace", "sessions",
+OUR_SLIM_MODULES = {"names", "config", "notify", "mockrace", "sessions", "series_tables",
                     "db", "standings", "makes"}
 
 
@@ -42,8 +42,12 @@ def imported_modules(path):
         if isinstance(node, ast.Import):
             out.update(a.name.split(".")[0] for a in node.names)
         elif isinstance(node, ast.ImportFrom):
-            # Relative: "..adapters.results_html" -> "adapters"
-            out.add((node.module or "").split(".")[0])
+            # Relative: "..adapters.results_html" -> "adapters"; and
+            # "from .. import series_tables" names the module in the alias.
+            if node.module:
+                out.add(node.module.split(".")[0])
+            else:
+                out.update(a.name.split(".")[0] for a in node.names)
     return {m for m in out if m}
 
 
@@ -63,6 +67,12 @@ def test_sessions_is_safe_for_the_api_to_import():
     # The whole reason it exists. If this grows a dependency, the API breaks.
     mods = imported_modules(ROOT / "src" / "sessions.py")
     assert mods <= {"re"}, f"src/sessions.py must stay stdlib-only, imports {mods}"
+
+
+def test_series_tables_is_safe_for_the_api_to_import():
+    mods = imported_modules(ROOT / "src" / "series_tables.py")
+    allowed = {"datetime", "json", "logging", "re", "time", "requests"}
+    assert mods <= allowed, f"src/series_tables.py imports {mods - allowed}"
 
 
 def test_makes_is_safe_for_the_api_to_import():
