@@ -2653,6 +2653,47 @@ def _widget_cache(payload):
     return payload
 
 
+# How close the next race has to be before the widgets count down to it.
+# Further out than this is the off-season as far as a home screen goes: a
+# countdown reading "in 3 months" is noise, and the widget shows the MXT mark.
+# Server-side so it can change without an app build.
+_WIDGET_COUNTDOWN_DAYS = 30
+_WIDGET_NEXT_TTL = 300
+
+
+@app.get("/widget/next")
+def widget_next():
+    """What the home-screen widgets draw from 1.7.0 on: the next race and its
+    gate time, or `show: "logo"` when there is nothing close enough to count
+    down to. The widget ticks the countdown itself, so this is read rarely —
+    and nothing here is live timing.
+    """
+    hit = _WIDGET_CACHE.get("next")
+    if hit and hit[0] > time.time():
+        return hit[1]
+    nxt = next_events(limit=1)
+    ev = nxt[0] if nxt else None
+    gate = ev.get("start_time_utc") if ev else None
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if (not ev or not isinstance(gate, datetime.datetime)
+            or gate - now > datetime.timedelta(days=_WIDGET_COUNTDOWN_DAYS)):
+        payload = {"show": "logo", "next": None}
+    else:
+        payload = {"show": "countdown", "next": {
+            "series": ev.get("series"),
+            "series_long": _SERIES_LONG.get(ev.get("series"), ev.get("series")),
+            "round_label": ev.get("round_label"),
+            "venue": ev.get("venue"),
+            "city": ev.get("city"),
+            "state": ev.get("state"),
+            "gate_utc": gate.replace(microsecond=0).isoformat(),
+            # Drawn as given, so a phone in another zone still reads ET.
+            "start_time_et": ev.get("start_time_et"),
+        }}
+    _WIDGET_CACHE["next"] = (time.time() + _WIDGET_NEXT_TTL, payload)
+    return payload
+
+
 @app.get("/widget/standings")
 def widget_standings():
     """What the home-screen standings widget should show: the championship and
