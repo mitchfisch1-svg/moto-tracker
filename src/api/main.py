@@ -1851,8 +1851,43 @@ _MAKE_ALIASES = {
 # make chip-taps in the app instant and shield the site from per-user polling.
 _SESSIONS_CACHE: dict = {}   # key -> (expires_at, payload)
 _SESSIONS_LIST_TTL = 30      # the day's session list (new ones post ~each half hour)
-_SESSION_RESULT_TTL = 21600  # one session's finishing order — final once posted, so
-                             # keep it warm all race day (6h) instead of re-scraping
+_SESSION_RESULT_TTL = 21600  # a FINAL session result: settled, keep it warm
+_LIVE_RESULT_TTL = 60        # a result from inside a race weekend: ask again soon
+
+# Results pages are NOT final when they first appear, and for a whole season
+# everything here assumed they were: the first copy fetched was kept for good,
+# here and on every phone. During a race weekend a session's link is posted
+# before its times (the final's 450 Unseeded Qualifying 1 was saved EMPTY and
+# stayed empty), and Combined Qualifying is a running total that moves after
+# every session: the final's was frozen after Qualifying 1, Prado P1 on
+# 1:14.198, while the official board ended Deegan 1:13.296. That is the wrong
+# "final qualifying" a team rep saw and reported (09-26).
+#
+# So inside a race weekend nothing is kept for good: results are re-read after
+# _LIVE_RESULT_TTL. Outside one, the first complete copy is final, and every
+# payload says which it is (`final`) so the phone can follow the same rule.
+_RESULTS_SETTLE_PRE_H = 36   # SMX and MX run Friday programmes
+_RESULTS_SETTLE_POST_H = 12  # Overalls and corrections post hours after the gate
+
+
+def _results_can_still_change() -> bool:
+    """Is a race weekend on, or just over, so posted results may still move?"""
+    hit = _SESSIONS_CACHE.get("results-unsettled")
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        val = bool(query(
+            """
+            SELECT 1 FROM events
+            WHERE start_time_utc BETWEEN now() - make_interval(hours => %s)
+                                     AND now() + make_interval(hours => %s)
+            LIMIT 1
+            """,
+            (_RESULTS_SETTLE_POST_H, _RESULTS_SETTLE_PRE_H)))
+    except Exception:
+        val = True   # cannot tell: pin nothing rather than pin something wrong
+    _SESSIONS_CACHE["results-unsettled"] = (time.time() + 300, val)
+    return val
 
 
 def _sessions_cache_get(key):
@@ -2045,10 +2080,12 @@ def live_session_results(race_id: int, p: str = "view_race_result",
     cached = _sessions_cache_get(cache_key)
     if cached is not None:
         return cached
-    # Pre-stored in the DB (populated by the warmer / earlier taps): a ~50ms read
-    # instead of a 5-15s scrape, and it survives restarts + the site going down.
+    # A FINAL copy in the DB is the answer: a ~50ms read instead of a 5-15s
+    # scrape, and it survives restarts and the site going down. Any other copy
+    # (from inside a race weekend, or saved before `final` existed) is only a
+    # fallback for when the site cannot be reached.
     stored = _db_cache_get(db_key)
-    if stored is not None:
+    if stored is not None and stored.get("final"):
         _SESSIONS_CACHE[cache_key] = (time.time() + _SESSION_RESULT_TTL, stored)
         return stored
     if p == "view_combined_round_ranking":
@@ -2062,6 +2099,8 @@ def live_session_results(race_id: int, p: str = "view_race_result",
         resp = requests.get(url, headers=_LRM_HEADERS, timeout=20)
         resp.raise_for_status()
     except requests.RequestException:
+        if stored is not None:
+            return stored      # possibly stale beats nothing while the site is down
         raise HTTPException(status_code=502, detail="results site unavailable")
     soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -2075,6 +2114,8 @@ def live_session_results(race_id: int, p: str = "view_race_result",
             table, header = tb, cells
             break
     if table is None:
+        if stored is not None:
+            return stored
         raise HTTPException(status_code=404, detail="results not posted yet")
 
     # Column layout varies by view: after POS/#/BIKE/RIDER come 1-3 stat columns
@@ -2147,13 +2188,20 @@ def live_session_results(race_id: int, p: str = "view_race_result",
         # from a Triple Crown with a race still to run — both read "4-2" once
         # the columns are gone. Say so here rather than guessing later.
         payload["settled"] = _overall_is_settled(both_motos)
-    # An Overall fetched between the motos is NOT a result — it is half a
-    # result wearing the shape of one, and this cache has no expiry, so caching
-    # it pins "1---- 25 pts" forever. Serve it (the moto-1 order is real), but
-    # keep it briefly and in memory only, so the finished board replaces it.
+    # Final only with times on the board, outside a race weekend, and, for an
+    # Overall, with every race scored: one fetched between the motos is half a
+    # result wearing the shape of one ("1---- 25 pts").
+    final = bool(rows) and not _results_can_still_change()
     if is_overall and not payload["settled"]:
-        _SESSIONS_CACHE[cache_key] = (time.time() + _OVERALL_PROVISIONAL_TTL,
-                                      payload)
+        final = False
+    payload["final"] = final
+    if not final:
+        # Serve it (what is posted so far is real) but ask again soon. Saved
+        # only as a fallback for a site outage, and never if it is empty.
+        ttl = _OVERALL_PROVISIONAL_TTL if is_overall else _LIVE_RESULT_TTL
+        _SESSIONS_CACHE[cache_key] = (time.time() + ttl, payload)
+        if rows and not is_overall:
+            _db_cache_put(db_key, payload)
         return payload
     _SESSIONS_CACHE[cache_key] = (time.time() + _SESSION_RESULT_TTL, payload)
     _db_cache_put(db_key, payload)
@@ -3059,16 +3107,18 @@ def _event_qualifying(source_url):
     the Race Day tab while the day is running; what belongs on a finished
     round's page is the answer the day produced.
 
-    Immutable once posted, like any finished session, so this is cached the
-    same way — and, like the Overall, it has to be kept, because the results
-    site stops serving a round the moment the next one goes on track.
+    NOT immutable while the day runs: it is a running total that moves after
+    every qualifying session. Kept for good only once every block is final
+    (see _results_can_still_change).
     """
     smx = _event_smx_id(source_url)
     if not smx:
         return []
     key = f"qualifying:{smx}"
     stored = _db_cache_get(key)
-    if stored is not None:
+    # Only a board built entirely from final copies is kept; anything older
+    # (every one saved before `final` existed) is rebuilt from fresh pages.
+    if stored and all(b.get("final") for b in stored):
         return stored
     mem_key = ("qualifying", smx)
     live = _sessions_cache_get(mem_key)
@@ -3096,13 +3146,14 @@ def _event_qualifying(source_url):
             continue
         rows = (res or {}).get("results") or []
         if rows:
-            out.append({"label": label, "class_id": class_id, "rows": rows})
+            out.append({"label": label, "class_id": class_id, "rows": rows,
+                        "final": bool((res or {}).get("final"))})
     out.sort(key=lambda b: b["label"])
 
-    if out:
+    if out and all(b["final"] for b in out):
         _db_cache_put(key, out)
     else:
-        _SESSIONS_CACHE[mem_key] = (time.time() + _OVERALL_PROVISIONAL_TTL, out)
+        _SESSIONS_CACHE[mem_key] = (time.time() + _LIVE_RESULT_TTL, out)
     return out
 
 

@@ -110,12 +110,13 @@ class _Resp:
         pass
 
 
-def _scrape(monkeypatch, html, race_id):
+def _scrape(monkeypatch, html, race_id, race_weekend=False):
     """Run one Overall page through the parser with no network and no DB."""
     from src.api import main
 
     main._SESSIONS_CACHE.clear()
     put = []
+    monkeypatch.setattr(main, "_results_can_still_change", lambda: race_weekend)
     monkeypatch.setattr(main.requests, "get", lambda *a, **k: _Resp(html))
     monkeypatch.setattr(main, "_db_cache_get", lambda key: None)
     monkeypatch.setattr(main, "_db_cache_put",
@@ -141,6 +142,39 @@ def test_the_finished_round_is_written(monkeypatch):
     assert put == ["view_multi_main_result:1019512"]
     assert rows[0]["primary"] == "1-1"
     assert rows[0]["primary_label"] == "MOTOS"
+
+
+def test_nothing_is_final_inside_a_race_weekend(monkeypatch):
+    """Results move while the weekend runs. The final's Combined Qualifying was
+    saved after Qualifying 1 and served for good: Prado P1 on 1:14.198, when
+    the official board ended Deegan 1:13.296. Even a finished-looking board
+    is only a fallback copy until the weekend is over."""
+    from src.api import main
+
+    html = _page(FINAL_450, ["50", "40", "40", "39", "31", "29", "27", "27",
+                             "27", "26", "24", "22"])
+    _scrape(monkeypatch, html, 1019512, race_weekend=True)
+    expires, payload = main._SESSIONS_CACHE[("view_multi_main_result", 1019512)]
+    assert payload["final"] is False
+    assert expires - main.time.time() <= main._OVERALL_PROVISIONAL_TTL
+
+
+def test_a_copy_saved_before_final_existed_is_fetched_again(monkeypatch):
+    """Every copy saved this season predates `final`, and some are wrong. They
+    must be re-read, not served, or the fix never reaches what is stored."""
+    from src.api import main
+
+    main._SESSIONS_CACHE.clear()
+    stale = {"race_id": 1019512, "results": [{"name": "Stale Copy"}]}
+    monkeypatch.setattr(main, "_results_can_still_change", lambda: False)
+    monkeypatch.setattr(main, "_db_cache_get", lambda key: stale)
+    monkeypatch.setattr(main, "_db_cache_put", lambda key, payload: None)
+    html = _page(FINAL_450, ["50", "40", "40", "39", "31", "29", "27", "27",
+                             "27", "26", "24", "22"])
+    monkeypatch.setattr(main.requests, "get", lambda *a, **k: _Resp(html))
+    payload = main.live_session_results(1019512, p="view_multi_main_result")
+    assert payload["results"][0]["name"] != "Stale Copy"
+    assert payload["final"] is True
 
 
 def test_the_unrun_moto_stops_printing_as_dashes(monkeypatch):
