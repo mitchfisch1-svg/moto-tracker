@@ -796,11 +796,90 @@ def standings(
     return rows
 
 
+# --- manufacturers' championships: the series' own tables ---------------------
+# The app used to COMPUTE these, per class, from our results: a make scoring its
+# best finisher's points in each race. The series publishes the real thing, one
+# table per championship, and the computed version was a different competition
+# for SMX (it counted only the playoffs). Read the published table, as WMX and
+# the SMX playoffs are read, and never recompute it. Ids are per season; a
+# season without them falls back to the computed tables below until added.
+_MFR_POINTS = {2026: {"SX": 17, "MX": 23, "SMX": 24}}
+_MFR_TTL = 600
+
+
+def _parse_mfr_points(html: str):
+    """(title, rows) off a provider manufacturers page; rows None if no table.
+
+    No wins: the ordinal in each round cell ("Roczen 6th (22 pts)") is the
+    make's rank in that round, not a race result, so the table does not say
+    how many races a make won, and we do not guess.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    heading = soup.find(["h1", "h2", "h3"])
+    title = heading.get_text(" ", strip=True) if heading else ""
+    for tb in soup.find_all("table"):
+        trs = tb.find_all("tr")
+        if not trs:
+            continue
+        hdr = [c.get_text(" ", strip=True).upper()
+               for c in trs[0].find_all(["th", "td"])]
+        if "MANUFACTURER" not in hdr or "POINTS" not in hdr:
+            continue
+        mi, pi = hdr.index("MANUFACTURER"), hdr.index("POINTS")
+        rows = []
+        for tr in trs:
+            cells = [c.get_text(" ", strip=True)
+                     for c in tr.find_all(["th", "td"], recursive=False)]
+            # Round cells nest their own small tables; only a row that starts
+            # with a position is a manufacturer.
+            if len(cells) <= pi or not (cells[0] or "").isdigit():
+                continue
+            name = (cells[mi] or "").strip()
+            rows.append({
+                "position": int(cells[0]),
+                "manufacturer": _make_from_team(name) or name,
+                "points": int(cells[pi]) if cells[pi].isdigit() else 0,
+                "wins": None,
+            })
+        return title, rows
+    return title, None
+
+
+def _official_mfr_standings(series: str, year: int, sid: int):
+    key = f"mfr:{year}:{series}"
+    hit = _sessions_cache_get(key)
+    if hit is not None:
+        return hit
+    try:
+        resp = requests.get(f"{_RESULTS_HOME}?p=view_series_points&id={sid}",
+                            headers=_LRM_HEADERS, timeout=20)
+        resp.raise_for_status()
+        title, rows = _parse_mfr_points(resp.text)
+    except requests.RequestException:
+        title, rows = "", None
+    # Refuse a page that is not this season's manufacturers table, rather than
+    # serve the wrong table under the right heading.
+    if not rows or str(year) not in title or "MANUFACTURER" not in title.upper():
+        stored = _db_cache_get(key)
+        if stored is not None:
+            return stored
+        raise HTTPException(status_code=502, detail="results site unavailable")
+    payload = [{"class": "all", "label": "Manufacturers' championship",
+                "rows": rows}]
+    _SESSIONS_CACHE[key] = (time.time() + _MFR_TTL, payload)
+    _db_cache_put(key, payload)
+    return payload
+
+
 @app.get("/standings/manufacturers")
 def manufacturer_standings(series: str, year: int | None = None):
-    """Manufacturers championship, official style: in each points-scoring
-    session, a make scores its best finisher's points."""
+    """The manufacturers' championship: the series' published table where we
+    know it (see _MFR_POINTS), else computed the old way — in each scoring
+    session a make scores its best finisher's points — per class."""
     year = year or _current_year()
+    sid = (_MFR_POINTS.get(year) or {}).get(series.upper())
+    if sid:
+        return _official_mfr_standings(series.upper(), year, sid)
     labels = {"450": "450 — Men", "250": "250 — Men", "WMX": "WMX — Women"}
     out = []
     for cls in ("450", "250", "WMX"):
@@ -2677,7 +2756,16 @@ def _last_name(full):
     return (full or "").split(" ")[-1]
 
 
-def _title_fight_line(leader, chaser, gap, rounds_left):
+def _title_fight_line(leader, chaser, gap, rounds_left, champion_of=None):
+    """One line on the championship. `champion_of` ("2026 SuperMotocross 450")
+    means the series is over: a finished title is a result, not a fight. After
+    the final the Rundown still read "Jorge holds a slim 7-point lead over
+    Haiden — this one's anyone's", a fortnight after Jorge had won it."""
+    if champion_of:
+        if not chaser:
+            return f"{leader} is the {champion_of} champion."
+        return (f"{leader} is the {champion_of} champion, {gap} "
+                f"point{'s' if gap != 1 else ''} clear of {chaser}.")
     if not chaser:
         return f"{leader} leads the championship."
     left = (f" with {rounds_left} round{'s' if rounds_left != 1 else ''} left"
@@ -2821,6 +2909,7 @@ def rundown():
     total = prog[0]["total"] if prog else 0
     done = prog[0]["done"] if prog else 0
     rounds_left = max(0, total - done)
+    season_over = total > 0 and done >= total
 
     # Latest completed round of the active series (for "won last round").
     last = query(
@@ -2894,7 +2983,9 @@ def rundown():
                        if chaser else None),
             "title_fight": _title_fight_line(
                 leader["full_name"], chaser["full_name"] if chaser else None,
-                gap, rounds_left),
+                gap, rounds_left,
+                champion_of=(f"{year} {_SERIES_LONG.get(active, active)} {cls}"
+                             if season_over else None)),
             "won_last_round": last_winner.get(cls),
             "top5": [{"rider_id": x["rider_id"], "position": x["position"],
                       "full_name": x["full_name"], "number": x["number"],
@@ -2916,9 +3007,14 @@ def rundown():
                 break
     for c in classes:
         if c["chaser"] and c["chaser"]["gap"] <= 8:
-            storylines.append(
-                f"🔥 The {c['class']} title is on a knife's edge — just "
-                f"{c['chaser']['gap']} points separate the top two.")
+            if season_over:
+                storylines.append(
+                    f"🏆 {c['leader']['full_name']} took the {c['class']} title "
+                    f"by just {c['chaser']['gap']} points.")
+            else:
+                storylines.append(
+                    f"🔥 The {c['class']} title is on a knife's edge — just "
+                    f"{c['chaser']['gap']} points separate the top two.")
     if last_venue and last_winner:
         first_cls = classes[0]["class"] if classes else None
         w = last_winner.get(first_cls)
@@ -2957,6 +3053,7 @@ def rundown():
         "series_long": _SERIES_LONG.get(active, active),
         "as_of": f"after {last_venue}" if last_venue else "preseason",
         "rounds_done": done, "rounds_total": total, "rounds_left": rounds_left,
+        "season_over": season_over,
         "how_it_works": how_it_works,
         "previous_series_note": prev_note,
         "classes": classes,
