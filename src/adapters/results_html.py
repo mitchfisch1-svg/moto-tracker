@@ -20,6 +20,7 @@ from ..db import upsert
 from ..sessions import classify  # moved; re-exported for callers
 from ..resolve.riders import RiderResolver
 from ..standings import points_for
+from .. import rider_seasons
 
 USER_AGENT = "MotoTracker/0.1 (personal project; +https://github.com/)"
 REQUEST_DELAY_SECONDS = 1.0
@@ -158,7 +159,8 @@ class ResultsHTMLAdapter:
         normal = [r for r in races if r[3] in ("main", "moto")]
         tc_races = [r for r in races if r[3] == "tc_race"]
         total_results = 0
-        profiles = {}  # rider_id -> (team, manufacturer), latest wins
+        # rider_id -> (team, manufacturer, hometown, number, class), latest wins
+        profiles = {}
 
         for i, (race_id, label, cls, typ) in enumerate(normal):
             parsed = self.parse_race_results(race_id)
@@ -173,7 +175,8 @@ class ResultsHTMLAdapter:
                 )
                 if rider_id is not None and r["team"]:
                     profiles[rider_id] = (
-                        r["team"], manufacturer_from_team(r["team"]), r["hometown"]
+                        r["team"], manufacturer_from_team(r["team"]), r["hometown"],
+                        r["bike_number"], cls,
                     )
                 result_rows.append(
                     {
@@ -203,28 +206,33 @@ class ResultsHTMLAdapter:
                 conn, event, cls, race_list, resolver, profiles
             )
 
-        self._update_rider_profiles(conn, profiles)
+        self._update_rider_profiles(conn, profiles, event["season_id"])
         return total_results
 
     @staticmethod
-    def _update_rider_profiles(conn, profiles):
-        """Refresh riders' team + manufacturer from the latest parsed results.
+    def _update_rider_profiles(conn, profiles, season_id):
+        """Record what each rider raced under this season, from the results.
 
-        Stamps team_changed_at when the team actually changes. That's the signal
-        the headshot audit uses: a rider who switched teams but whose photo
-        hasn't been re-shot is still wearing the old kit.
+        Team, bike, number and class go into rider_seasons for this event's
+        season, and move the rider's "latest" fields forward only if this is
+        the newest season we know for them. It used to overwrite riders.team
+        outright, so re-ingesting an old round put a rider back in last
+        year's team. team_changed_at is still stamped on a real change: the
+        headshot audit uses it (a new team means the photo shows old kit).
         """
         if not profiles:
             return
         with conn.cursor() as cur:
+            cur.execute("SELECT year FROM seasons WHERE id = %s", (season_id,))
+            year = cur.fetchone()[0]
             cur.executemany(
-                "UPDATE riders SET team = %s, manufacturer = %s, hometown = %s, "
-                "team_changed_at = CASE "
-                "  WHEN team IS DISTINCT FROM %s THEN now() ELSE team_changed_at END "
-                "WHERE id = %s",
-                [(team, make, home, team, rid)
-                 for rid, (team, make, home) in profiles.items()],
+                "UPDATE riders SET hometown = COALESCE(%s, hometown) WHERE id = %s",
+                [(p[2], rid) for rid, p in profiles.items()],
             )
+        rider_seasons.record(
+            conn, year,
+            [(rid, p[3], p[0], p[1], p[4]) for rid, p in profiles.items()],
+            "results")
 
     def _ingest_triple_crown(self, conn, event, cls, race_list, resolver, profiles):
         """Combine the 3 TC races for a class into one overall main result.
@@ -245,7 +253,8 @@ class ResultsHTMLAdapter:
                 )
                 if rider_id is not None and r["team"]:
                     profiles[rider_id] = (
-                        r["team"], manufacturer_from_team(r["team"]), r["hometown"]
+                        r["team"], manufacturer_from_team(r["team"]), r["hometown"],
+                        r["bike_number"], cls,
                     )
                 if rider_id is not None and r["position"]:
                     pos_by_rider[rider_id] = r["position"]

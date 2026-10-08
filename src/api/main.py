@@ -773,8 +773,12 @@ def standings(
             raise HTTPException(status_code=502,
                                 detail="results site unavailable")
     sql = """
-        SELECT st.class, st.position, r.id AS rider_id, r.full_name, r.number,
-               r.team, r.manufacturer,
+        SELECT st.class, st.position, r.id AS rider_id, r.full_name,
+               -- What the rider raced under THAT season (rider_seasons), not
+               -- their latest team: riders move over the winter.
+               COALESCE(rs.number, r.number) AS number,
+               COALESCE(rs.team, r.team) AS team,
+               COALESCE(rs.manufacturer, r.manufacturer) AS manufacturer,
                COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url,
                st.points, st.wins,
                st.podiums
@@ -782,6 +786,7 @@ def standings(
         JOIN seasons se ON se.id = st.season_id
         JOIN series  s  ON s.id  = se.series_id
         JOIN riders  r  ON r.id  = st.rider_id
+        LEFT JOIN rider_seasons rs ON rs.rider_id = r.id AND rs.year = se.year
         WHERE s.abbrev = %s AND se.year = %s
     """
     params = [series.upper(), year]
@@ -1115,7 +1120,10 @@ def riders(search: str | None = None, limit: int = Query(25, le=100)):
 def rider(rider_id: int):
     info = query(
         "SELECT id, full_name, number, team, manufacturer, hometown, "
-        "COALESCE(headshot_override, headshot_racerx, headshot_url) AS headshot_url, country "
+        "COALESCE(headshot_override, headshot_racerx, headshot_url) AS headshot_url, country, "
+        # The season the team above is from: over the winter it is next
+        # season's announced team, and the app says so.
+        "(SELECT max(year) FROM rider_seasons WHERE rider_id = riders.id) AS team_season "
         "FROM riders WHERE id = %s",
         [rider_id],
     )
@@ -2407,11 +2415,15 @@ def _wmx_standings():
         try:
             matches = query(
                 """
-                SELECT id, full_name, team, manufacturer,
-                       COALESCE(headshot_override, headshot_racerx, headshot_url) AS headshot_url
-                FROM riders WHERE lower(full_name) = ANY(%s)
+                SELECT r.id, r.full_name,
+                       COALESCE(rs.team, r.team) AS team,
+                       COALESCE(rs.manufacturer, r.manufacturer) AS manufacturer,
+                       COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url
+                FROM riders r
+                LEFT JOIN rider_seasons rs ON rs.rider_id = r.id AND rs.year = %s
+                WHERE lower(r.full_name) = ANY(%s)
                 """,
-                (names,),
+                (_WMX_SEASON, names),
             )
             by_name = {m["full_name"].lower(): m for m in matches}
             for r in rows:
@@ -2490,7 +2502,7 @@ def _name_key(name) -> str:
     return re.sub(r"[^a-z0-9]", "", fold(name or ""))
 
 
-def _attach_riders(rows):
+def _attach_riders(rows, year):
     """Give each official row our rider's id, team, bike and headshot, so it
     taps through to a rider page like any other standings row.
 
@@ -2504,10 +2516,15 @@ def _attach_riders(rows):
     try:
         riders = query(
             """
-            SELECT id, full_name, number, team, manufacturer, hometown,
-                   COALESCE(headshot_override, headshot_racerx, headshot_url) AS headshot_url
-            FROM riders
-            """
+            SELECT r.id, r.full_name, r.hometown,
+                   COALESCE(rs.number, r.number) AS number,
+                   COALESCE(rs.team, r.team) AS team,
+                   COALESCE(rs.manufacturer, r.manufacturer) AS manufacturer,
+                   COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url
+            FROM riders r
+            LEFT JOIN rider_seasons rs ON rs.rider_id = r.id AND rs.year = %s
+            """,
+            (year,),
         )
         aliases = query("SELECT rider_id, alias FROM rider_aliases")
     except Exception as e:
@@ -2552,7 +2569,7 @@ def _smx_fetch(year: int, cls: str):
     if (not rows or str(year) not in t or "PLAYOFF" not in t
             or not re.search(rf"\b{cls}\b", t)):
         raise ValueError(f"not the {year} SMX {cls} playoff table: {title!r}")
-    rows = _attach_riders(rows)
+    rows = _attach_riders(rows, year)
     _SESSIONS_CACHE[f"smx:{year}:{cls}"] = (time.time() + _SMX_TTL, rows)
     _db_cache_put(f"smx:standings:{year}:{cls}", rows)
     return rows
@@ -2974,13 +2991,15 @@ def rundown():
     else:
         rows = query(
             """
-            SELECT st.class, st.position, r.id AS rider_id, r.full_name, r.number,
-                   r.manufacturer,
+            SELECT st.class, st.position, r.id AS rider_id, r.full_name,
+                   COALESCE(rs.number, r.number) AS number,
+                   COALESCE(rs.manufacturer, r.manufacturer) AS manufacturer,
                    COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url,
                    r.hometown,
                    st.points, st.wins, st.podiums
             FROM standings st JOIN seasons se ON se.id = st.season_id
             JOIN series s ON s.id = se.series_id JOIN riders r ON r.id = st.rider_id
+            LEFT JOIN rider_seasons rs ON rs.rider_id = r.id AND rs.year = se.year
             WHERE s.abbrev = %s AND se.year = %s AND st.position <= 5
             ORDER BY st.class, st.position
             """,

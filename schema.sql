@@ -248,3 +248,24 @@ CREATE TABLE IF NOT EXISTS live_activity_tokens (
     kind        TEXT NOT NULL DEFAULT 'update',   -- 'update' | 'start'
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- A rider's number, team, bike and class FOR ONE SEASON. riders.team is "the
+-- latest we know", which is right for a rider page and wrong for last season's
+-- standings: riders change teams over the winter, and 2026's table must keep
+-- showing what they raced in 2026. `source`, least to most trusted: 'news' (an
+-- announced move, hand-checked, before any entry list), 'entry_list' (the
+-- series' entry list for a round), 'results' (what they actually raced under).
+-- A less trusted source never overwrites a more trusted one; see
+-- src/rider_seasons.py.
+CREATE TABLE IF NOT EXISTS rider_seasons (
+    rider_id      INTEGER NOT NULL REFERENCES riders(id),
+    year          INTEGER NOT NULL,
+    number        TEXT,
+    team          TEXT,
+    manufacturer  TEXT,
+    class         TEXT,
+    source        TEXT NOT NULL,
+    note          TEXT,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (rider_id, year)
+);
