@@ -124,3 +124,40 @@ def test_a_page_for_another_season_is_refused(monkeypatch):
     monkeypatch.setattr(o.requests, "get", lambda *a, **k: R())
     assert o.fetch_standings(16, 1, season=2026)
     assert o.fetch_standings(16, 1, season=2027) == []
+
+
+# Round cells as the provider really draws them: the round's points and its
+# OVERALL finish, then a nested table of moto lines. Hunter Lawrence won 12
+# motos and 6 rounds in 2026; the championship counts rounds.
+def _cell(points, finish, motos):
+    lines = "".join(f"<tr><td>{p} {f}</td></tr>" for p, f in motos)
+    return f"<td>{points} {finish}<table>{lines}</table></td>"
+
+
+ROUND_PAGE = (
+    "<table><tr><th></th><th>#</th><th>BIKE</th><th>RIDER</th><th>POINTS</th>"
+    "<th>POINT ADJUSTMENTS</th><th>1: FOX RACEWAY</th><th>2: HANGTOWN</th>"
+    "<th>3: THUNDER VALLEY</th></tr>"
+    "<tr><td>1</td><td>96</td><td>HON</td><td>Hunter Lawrence</td><td>140</td><td>0</td>"
+    + _cell(50, "1st", [(25, "1st"), (25, "1st")])
+    + _cell(47, "1st", [(25, "1st"), (22, "2nd")])
+    + _cell(43, "3rd", [(25, "1st"), (18, "4th")])
+    + "</tr>"
+    "<tr><td>2</td><td>38</td><td>YAM</td><td>Haiden Deegan</td><td>120</td><td>0</td>"
+    + _cell(42, "2nd", [(22, "2nd"), (20, "3rd")])
+    + _cell(36, "4th", [(18, "4th"), (18, "4th")])
+    + "<td></td></tr></table>"
+)
+
+
+def test_wins_and_podiums_are_round_finishes_not_motos():
+    rows = parse_series_points(ROUND_PAGE)
+    assert [(r["rider"], r["wins"], r["podiums"]) for r in rows] == [
+        ("Hunter Lawrence", 2, 3),     # 4 moto wins, but 2 round wins
+        ("Haiden Deegan", 0, 1),       # missed round 3: an empty cell
+    ]
+
+
+def test_a_page_without_round_columns_has_no_wins():
+    """None, not 0: an overlay must not zero a count it was never told."""
+    assert parse_series_points(PAGE)[0]["wins"] is None

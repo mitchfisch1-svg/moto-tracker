@@ -367,6 +367,54 @@ def _smx_is_the_playoffs(_cur, http):
     return bad
 
 
+@check("SX and MX standings match the official tables, wins and podiums too",
+       "every MX championship counted MOTO wins: Hunter Lawrence 12 wins in "
+       "an 11-round season (official 6), Jett 17 podiums (official 9)")
+def _standings_match_official(cur, http):
+    from src.adapters.official_standings import fetch_standings, match_key
+    year = datetime.date.today().year
+    if not http or year not in CHAMPIONSHIPS:
+        return []          # missing ids are _season_ids_known's failure
+    cur.execute("SELECT e.source_url FROM events e JOIN seasons se "
+                "ON se.id = e.season_id WHERE se.year = %s AND e.status = 'final' "
+                "AND e.source_url LIKE '%%view_event%%' "
+                "ORDER BY e.event_date DESC LIMIT 1", (year,))
+    row = cur.fetchone()
+    m = row and re.search(r"[?&]id=(\d+)", row[0] or "")
+    if not m:
+        return []          # nothing raced yet this season
+    served = {}
+    bad = []
+    for abbrev, cls, sid in CHAMPIONSHIPS[year]:
+        if abbrev == "SMX":
+            continue       # the playoffs have their own check above
+        if abbrev not in served:
+            served[abbrev] = requests.get(
+                API + "/standings", params={"series": abbrev, "year": year},
+                headers=UA, timeout=90).json()
+        ours = {match_key(r["full_name"]): r
+                for r in served[abbrev] if r["class"] == cls}
+        site = fetch_standings(sid, m.group(1), season=year)
+        if not site:
+            bad.append(f"{abbrev} {cls}: official table unavailable")
+            continue
+        for s in site:
+            o = ours.get(match_key(s["rider"]))
+            want = (s["points"], s["wins"], s["podiums"])
+            if o is None:
+                if s["wins"] or s["podiums"] or (s["position"] or 99) <= 10:
+                    bad.append(f"{abbrev} {cls} {s['rider']}: official "
+                               f"{want[0]} pts {want[1]}W {want[2]}P, we omit them")
+                continue
+            got = (o["points"], o["wins"], o["podiums"])
+            if s["wins"] is None:
+                want, got = want[:1], got[:1]
+            if want != got:
+                bad.append(f"{abbrev} {cls} {s['rider']}: official {want}, "
+                           f"we serve {got} (pts, W, P)")
+    return bad
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db-only", action="store_true", help="skip HTTP checks")

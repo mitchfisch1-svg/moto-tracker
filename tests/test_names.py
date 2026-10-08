@@ -89,3 +89,11 @@ def test_the_ordinary_cases_did_not_move():
     assert titlecase_name("HAIDEN DEEGAN") == "Haiden Deegan"
     assert titlecase_name("WILL CANAGUIER III") == "Will Canaguier III"
     assert titlecase_name("BAYLER MCKELLAR") == "Bayler McKellar"
+
+
+def test_a_region_tag_does_not_hide_a_shouted_name():
+    """San Diego's 250 combined qualifying read "HAIDEN DEEGAN (West)": the
+    tag's casing made the name look already cased."""
+    assert titlecase_name("HAIDEN DEEGAN (West)") == "Haiden Deegan (West)"
+    assert titlecase_name("TRE FIERRO III (East)") == "Tre Fierro III (East)"
+    assert titlecase_name("Haiden Deegan (West)") == "Haiden Deegan (West)"

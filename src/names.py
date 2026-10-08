@@ -81,6 +81,11 @@ def titlecase_name(raw):
     if not raw:
         return raw
     s = str(raw)
+    # SX 250 boards tag the region: "HAIDEN DEEGAN (West)". The tag's own
+    # casing made the whole name read as mixed, so it was left shouted.
+    tag = re.search(r"\s*\((?:EAST|WEST)\)$", s, re.I)
+    if tag:
+        return titlecase_name(s[:tag.start()]) + s[tag.start():]
     if not _is_shouted(s):
         return s
     out = []

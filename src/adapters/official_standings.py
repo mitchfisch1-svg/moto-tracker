@@ -73,13 +73,23 @@ def _cell_int(text):
         return None
 
 
+_ROUND_COL_RE = re.compile(r"^\d+:")
+_FINISH_RE = re.compile(r"^(\d+)(st|nd|rd|th)$", re.I)
+
+
 def parse_series_points(html: str):
-    """Rows of {position, rider, points, adjustment} from a standings page.
+    """Rows of {position, rider, points, adjustment, wins, podiums} from a
+    standings page.
 
     Pure, so it can be tested without the network. Columns are located by their
     header rather than by index — the provider varies the leading columns
     between views, and a fixed index is how a parser starts quietly reading the
     wrong number.
+
+    wins/podiums are ROUND results: each round cell reads "<points> <round
+    finish> <race lines…>". In motocross that is the Overall, not a moto —
+    counting moto wins gave Hunter Lawrence 12 "wins" in an 11-round season
+    (the official count is 6). None when the page has no round columns.
     """
     soup = BeautifulSoup(html, "html.parser")
     for table in soup.find_all("table"):
@@ -92,22 +102,39 @@ def parse_series_points(html: str):
             continue
         ri, pi = header.index("RIDER"), header.index("POINTS")
         ai = header.index("POINT ADJUSTMENTS") if "POINT ADJUSTMENTS" in header else None
+        round_idx = [i for i, h in enumerate(header) if _ROUND_COL_RE.match(h)]
         out = []
         for tr in rows[1:]:
             cells = [c.get_text(strip=True) for c in tr.find_all("td")]
+            # Each round cell nests its own table of moto lines, so only the
+            # row's direct cells line up with the header.
+            tds = tr.find_all(["th", "td"], recursive=False)
             if len(cells) <= max(ri, pi):
                 continue
             points = _cell_int(cells[pi])
             name = cells[ri].strip()
             if points is None or not name:
                 continue          # section headers and spacer rows
+            finishes = []
+            for i in round_idx:
+                toks = tds[i].get_text(" ", strip=True).split() if i < len(tds) else []
+                m = _FINISH_RE.match(toks[1]) if len(toks) >= 2 else None
+                if m:
+                    finishes.append(int(m.group(1)))
             out.append({
+                "_finishes": finishes,
                 "position": _cell_int(cells[0]) if cells else None,
                 "rider": name,
                 "points": points,
                 "adjustment": (_cell_int(cells[ai]) or 0)
                               if ai is not None and len(cells) > ai else 0,
             })
+        # No round finish anywhere on the page: the counts are unknown, not 0.
+        known = any(r["_finishes"] for r in out)
+        for r in out:
+            f = r.pop("_finishes")
+            r["wins"] = sum(1 for x in f if x == 1) if known else None
+            r["podiums"] = sum(1 for x in f if x <= 3) if known else None
         if out:
             return out
     return []
