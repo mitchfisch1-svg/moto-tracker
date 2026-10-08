@@ -12,6 +12,7 @@ would otherwise invent one.
 import argparse
 import json
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -23,6 +24,7 @@ load_dotenv(ROOT / ".env")
 import psycopg  # noqa: E402
 from src.config import get_database_url  # noqa: E402
 from src import rider_seasons  # noqa: E402
+from src.names import fold  # noqa: E402
 
 
 def main():
@@ -37,8 +39,12 @@ def main():
     with psycopg.connect(get_database_url()) as conn:
         rows, missing = [], []
         for m in data["moves"]:
-            hit = conn.execute("SELECT id FROM riders WHERE lower(full_name) = lower(%s)",
-                               (m["rider"],)).fetchall()
+            # Letters and digits only, as everywhere else in MXT: "R.J.
+            # Hampshire" is the rider stored as "R J Hampshire".
+            hit = conn.execute(
+                "SELECT id FROM riders WHERE regexp_replace(lower(full_name), "
+                "'[^a-z0-9]', '', 'g') = %s",
+                (re.sub(r"[^a-z0-9]", "", fold(m["rider"])),)).fetchall()
             if len(hit) != 1:
                 missing.append(f"{m['rider']} ({len(hit)} matches)")
                 continue
