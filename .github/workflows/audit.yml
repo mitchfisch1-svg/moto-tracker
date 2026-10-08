@@ -9,6 +9,11 @@ on:
   schedule:
     - cron: "40 * * * *"     # hourly, off the cron rush
   workflow_dispatch:
+    inputs:
+      test_alert:
+        description: "Also send a test alert to the phone (checks the NTFY_TOPIC secret)"
+        type: boolean
+        default: false
   push:
     paths:
       - "scripts/audit.py"
@@ -23,6 +28,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements-api.txt
+      - name: Send a test alert
+        if: github.event_name == 'workflow_dispatch' && inputs.test_alert
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          if [ -z "$NTFY_TOPIC" ]; then echo "NTFY_TOPIC secret is not set"; exit 1; fi
+          curl -sf -H "Title: MXT alerts: GitHub can reach you" -H "Tags: white_check_mark"             -d "Test from the audit job. Real alerts look like this when a data check fails."             "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
       - name: Check production invariants
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
