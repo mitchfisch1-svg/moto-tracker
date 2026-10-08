@@ -1,5 +1,5 @@
 {
- "_about": "2027 rider moves ANNOUNCED by a team, manufacturer or the rider, checked 2026-10-08. Only confirmed moves are here: reports and rumours (DiFrancesco to KTM, Stewart to Kawasaki, Bennick to KTM, Cochran to Star Yamaha, Thrasher's and Mosiman's new teams, a Tomac retirement) are deliberately left out until announced. Applied as source 'news' by scripts/apply_announced_moves.py; the series' entry lists (source 'entry_list') and results override it from January. Team names follow the spelling the series' own entry lists use, so teammates read the same.",
+ "_about": "2027 rider moves ANNOUNCED by a team, manufacturer or the rider, checked 2026-10-08. Only confirmed moves are here: reports and rumours (DiFrancesco to KTM, Stewart to Kawasaki, Bennick to KTM, Cochran to Star Yamaha, Thrasher's and Mosiman's new teams, Roczen's possible retirement) are deliberately left out until announced. Applied as source 'news' by scripts/apply_announced_moves.py; the series' entry lists (source 'entry_list') and results override it from January. Team names follow the spelling the series' own entry lists use, so teammates read the same.",
  "season": 2027,
  "moves": [
   {
@@ -110,6 +110,22 @@
   {
    "rider": "Marshal Weltin",
    "note": "Retiring (rider's post)."
+  }
+ ],
+ "retired": [
+  {
+   "rider": "Eli Tomac",
+   "after": 2026,
+   "announced": "2026-08-31",
+   "source": "https://racerxonline.com/2026/08/31/ktm-eli-tomac-retiring-after-2026-smx-playoffs",
+   "note": "KTM release: retiring after the 2026 SMX playoffs."
+  },
+  {
+   "rider": "Dylan Ferrandis",
+   "after": 2026,
+   "announced": "2026-09-22",
+   "source": "https://racerxonline.com/2026/09/22/dylan-ferrandis-this-weekends-race-will-be-my-last-one-as-professional-racer",
+   "note": "Rider's announcement: the LA playoff was his last race as a professional."
   }
  ]
 }

@@ -269,3 +269,26 @@ CREATE TABLE IF NOT EXISTS rider_seasons (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (rider_id, year)
 );
+
+-- Rider moves spotted in the news MXT collects (src/pipeline/watch_moves.py).
+-- One row per article per rider. 'applied' went into rider_seasons as source
+-- 'news' (a signing reported by two or more outlets that names a team we
+-- recognise); 'pending' needs a person to confirm (a departure, a team we do
+-- not recognise, one outlet only); 'rumour' never reaches the app.
+CREATE TABLE IF NOT EXISTS rider_move_candidates (
+    id          SERIAL PRIMARY KEY,
+    article_id  INTEGER NOT NULL REFERENCES news_articles(id) ON DELETE CASCADE,
+    rider_id    INTEGER NOT NULL REFERENCES riders(id),
+    season      INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    team        TEXT,
+    class       TEXT,
+    status      TEXT NOT NULL,
+    seen_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (article_id, rider_id)
+);
+
+-- The last season a rider raced, once he has announced his retirement. Set by
+-- scripts/apply_announced_moves.py from an announcement; NULL for everyone
+-- still racing. Rider pages say so rather than show a team as if he were.
+ALTER TABLE riders ADD COLUMN IF NOT EXISTS retired_after INTEGER;

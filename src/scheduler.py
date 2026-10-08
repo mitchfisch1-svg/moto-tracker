@@ -27,7 +27,7 @@ from .adapters.schedule_smx import ScheduleSMXAdapter
 from .db import get_connection
 from .notify import notify_work
 from .pipeline.run_results import resolve_missing_event_ids, select_events
-from .pipeline import sync_entry_lists
+from .pipeline import sync_entry_lists, watch_moves
 from .standings import apply_official_standings, recompute_standings
 
 logging.basicConfig(
@@ -216,6 +216,14 @@ def results_work():
                     log.info("entries: %s rider-season row(s) from entry lists", n)
             except Exception:
                 log.exception("entries: entry-list sync failed; will retry next run")
+            # And the news: signings two outlets agree on go in; anything less
+            # waits for a person. Database only, so cheap every hour.
+            try:
+                applied, _ = watch_moves.scan(conn)
+                if applied:
+                    log.info("moves: %s announced move(s) applied", len(applied))
+            except Exception:
+                log.exception("moves: news scan failed; will retry next run")
             return
         events = select_events(conn, target_status="live")
         if not events:

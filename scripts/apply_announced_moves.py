@@ -59,6 +59,16 @@ def main():
                 [(rider_id, None, m["team"], m["manufacturer"], m["class"])],
                 "news", note=note)
             print(f"  {m['rider']}: {season} {m['class']} {m['team']}")
+        for r in data.get("retired", []):
+            hit = conn.execute(
+                "SELECT id FROM riders WHERE regexp_replace(lower(full_name), "
+                "'[^a-z0-9]', '', 'g') = %s",
+                (re.sub(r"[^a-z0-9]", "", fold(r["rider"])),)).fetchall()
+            if len(hit) != 1:
+                sys.exit(f"no single rider for retirement: {r['rider']}")
+            conn.execute("UPDATE riders SET retired_after = %s WHERE id = %s",
+                         (r["after"], hit[0][0]))
+            print(f"  {r['rider']}: retired after {r['after']}")
         if args.dry_run:
             conn.rollback()
             print(f"dry run: {written} row(s) would change")

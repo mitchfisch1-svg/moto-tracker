@@ -1121,6 +1121,7 @@ def rider(rider_id: int):
     info = query(
         "SELECT id, full_name, number, team, manufacturer, hometown, "
         "COALESCE(headshot_override, headshot_racerx, headshot_url) AS headshot_url, country, "
+        "retired_after, "
         # The season the team above is from: over the winter it is next
         # season's announced team, and the app says so.
         "(SELECT max(year) FROM rider_seasons WHERE rider_id = riders.id) AS team_season "
