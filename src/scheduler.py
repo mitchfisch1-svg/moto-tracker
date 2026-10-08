@@ -27,6 +27,7 @@ from .adapters.schedule_smx import ScheduleSMXAdapter
 from .db import get_connection
 from .notify import notify_work
 from .pipeline.run_results import resolve_missing_event_ids, select_events
+from .pipeline import sync_entry_lists
 from .standings import apply_official_standings, recompute_standings
 
 logging.basicConfig(
@@ -206,6 +207,15 @@ def results_work():
             # No race on right now — but a previous round may have silently
             # failed to ingest, so check before going back to sleep.
             _catch_up_missed_rounds(conn)
+            # And read the entry lists for any round in the next ten days: the
+            # first official word on who is riding what this season. Nothing
+            # to do (one query) when no round is that close.
+            try:
+                n = sync_entry_lists.sync(conn)
+                if n:
+                    log.info("entries: %s rider-season row(s) from entry lists", n)
+            except Exception:
+                log.exception("entries: entry-list sync failed; will retry next run")
             return
         events = select_events(conn, target_status="live")
         if not events:
