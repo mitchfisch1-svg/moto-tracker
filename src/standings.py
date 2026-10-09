@@ -181,7 +181,8 @@ def _rider_index(conn):
     return idx
 
 
-def apply_official_standings(conn, season_id: int | None = None) -> dict:
+def apply_official_standings(conn, season_id: int | None = None,
+                             year: int | None = None) -> dict:
     """Overlay the series' own published points onto our computed standings.
 
     Mostly an OVERLAY, not a replacement. recompute_standings() still runs
@@ -193,6 +194,11 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
     race afternoon, every championship simply keeps its computed figure, which
     is correct to within an adjustment. Standings going stale beats standings
     going blank.
+
+    `year` defaults to this calendar year: the live pipeline only ever touches
+    the season being raced. Pass a past year to restore that season's official
+    figures after a rebuild — recompute_standings() with no season_id rebuilds
+    EVERY season from raw results (moto wins, no point adjustments, no bikes).
     """
     from .adapters.official_standings import fetch_standings, match_key
     from . import series_tables
@@ -200,13 +206,16 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
     with conn.cursor() as cur:
         # Any recent event anchors the page; the provider returns the whole
         # season for whichever championship is asked for.
+        # The season's own latest round where it has one, so a past season is
+        # read as of its end.
         cur.execute(
             """
             SELECT e.source_url FROM events e
             JOIN seasons se ON se.id = e.season_id
             WHERE e.source_url LIKE '%%view_event%%' AND e.status = 'final'
-            ORDER BY e.event_date DESC LIMIT 1
-            """
+            ORDER BY (se.year = %s) DESC, e.event_date DESC LIMIT 1
+            """,
+            (year or datetime.date.today().year,),
         )
         row = cur.fetchone()
     if not row:
@@ -223,7 +232,7 @@ def apply_official_standings(conn, season_id: int | None = None) -> dict:
     # riders. The ids come from series_tables, which the scheduler keeps up to
     # date by reading each new table's heading (on its own connection: it
     # commits, and this one may be holding a half-written ingest).
-    year = datetime.date.today().year
+    year = year or datetime.date.today().year
     champs = series_tables.championships(year, series_tables.load(conn))
     if not champs:
         return {"anchor": anchor, "applied": 0, "championships": {},

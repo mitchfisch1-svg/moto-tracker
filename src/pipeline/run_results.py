@@ -219,7 +219,18 @@ def main():
     if args.recompute_only:
         with get_connection() as conn:
             recompute_standings(conn)
-            _report_official(apply_official_standings(conn))
+            # That rebuilt EVERY season from raw results, so put each season's
+            # official figures back, not just this year's: run in 2027, 2026
+            # would otherwise go back to moto wins and computed points.
+            from .. import series_tables
+            found = series_tables.load(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT se.year FROM standings st "
+                            "JOIN seasons se ON se.id = st.season_id")
+                have = {r[0] for r in cur.fetchall()}
+            for y in sorted(have & series_tables.years(found)):
+                print(f"Official {y}:")
+                _report_official(apply_official_standings(conn, year=y))
             with conn.cursor() as cur:
                 cur.execute("SELECT DISTINCT season_id FROM standings")
                 season_ids = [row[0] for row in cur.fetchall()]
