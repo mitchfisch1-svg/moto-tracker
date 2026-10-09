@@ -1165,7 +1165,7 @@ def riders(search: str | None = None, limit: int = Query(25, le=100)):
 
 
 @app.get("/riders/{rider_id}")
-def rider(rider_id: int):
+def rider(rider_id: int, year: int | None = None):
     info = query(
         "SELECT id, full_name, number, team, manufacturer, hometown, "
         "COALESCE(headshot_override, headshot_racerx, headshot_url) AS headshot_url, country, "
@@ -1232,9 +1232,13 @@ def rider(rider_id: int):
         standings_rows = [r for r in standings_rows
                           if not (r["class"] == "WMX" and r.get("year") == wmx[0]["year"])]
     standings_rows = standings_rows + wmx
-    # One season on the page: the rider's latest. Without this, January would
-    # list 2026's championships beside 2027's with nothing telling them apart.
-    year = max((r["year"] for r in standings_rows if r.get("year")), default=None)
+    # One season on the page: the one asked for, else the rider's latest.
+    # Without this, January would list 2026's championships beside 2027's
+    # with nothing telling them apart. The others are a chip away (`seasons`).
+    seasons = sorted({r["year"] for r in standings_rows if r.get("year")},
+                     reverse=True)
+    preview = _rider_preview(rider_id, info[0], standings_rows, seasons)
+    year = year if year in seasons else (seasons[0] if seasons else None)
     standings_rows = [r for r in standings_rows if r.get("year") == year]
     races = query(
         """
@@ -1250,12 +1254,166 @@ def rider(rider_id: int):
     ) if year else []
     return {
         "rider": info[0],
+        "season": year,
+        "seasons": seasons,
+        "preview": preview,
         "season_stats": _season_line(standings_rows, races[0] if races else None,
                                      year),
         "standings": [{k: v for k, v in r.items()
                        if k not in ("round_finishes", "seeding")}
                       for r in standings_rows],
         "recent_results": recent,
+    }
+
+
+def _upcoming_season(after_year):
+    """The season after `after_year`, if its calendar is in: the one a
+    preview can be shown for. None until a round of it is scheduled."""
+    if after_year is None:
+        return None
+    rows = query(
+        """
+        SELECT 1 FROM events e JOIN seasons se ON se.id = e.season_id
+        WHERE se.year = %s LIMIT 1
+        """, [after_year + 1])
+    return after_year + 1 if rows else None
+
+
+def _season_start(series, year):
+    """The first round of one series in `year`, or None if none is scheduled."""
+    rows = query(
+        """
+        SELECT e.id AS event_id, e.round_number, e.venue, e.city, e.state,
+               e.event_date, e.start_time_utc
+        FROM events e
+        JOIN seasons se ON se.id = e.season_id
+        JOIN series  s  ON s.id  = se.series_id
+        WHERE s.abbrev = %s AND se.year = %s
+        ORDER BY e.event_date, e.round_number LIMIT 1
+        """, [series, year])
+    return dict(rows[0], series=series) if rows else None
+
+
+def _rider_preview(rider_id, info, standings_rows, seasons):
+    """What is known of a rider's NEXT season before it has a result: the
+    team and bike announced for it (or that none has been), whether he has
+    retired, and when his season starts. Nothing guessed: no number, class
+    or region until an entry list says so. None once the season has
+    standings — from then it is an ordinary season on the page."""
+    last = seasons[0] if seasons else None
+    nxt = _upcoming_season(last)
+    if nxt is None:
+        return None
+    rs = query(
+        """
+        SELECT team, manufacturer, number, class, source
+        FROM rider_seasons WHERE rider_id = %s AND year = %s
+        """, [rider_id, nxt])
+    rs = rs[0] if rs else {}
+    retired = info.get("retired_after") is not None and info["retired_after"] < nxt
+    raced = {r["series"] for r in standings_rows if r.get("year") == last}
+    # The series he raced last season decides where his next one starts; a
+    # WMX rider's championship is filed under MX.
+    series = "SX" if "SX" in raced else "MX" if "MX" in raced else None
+    return {
+        "year": nxt,
+        "retired": retired,
+        "retired_after": info.get("retired_after") if retired else None,
+        "team": rs.get("team"),
+        "manufacturer": rs.get("manufacturer"),
+        "number": rs.get("number"),
+        # 'news' = announced (two outlets agreed); 'entry_list' = the series'
+        # own entry list for a round of that season.
+        "source": rs.get("source"),
+        "starts": None if retired or not series else _season_start(series, nxt),
+    }
+
+
+@app.get("/season-preview")
+def season_preview(series: str):
+    """The coming season, before it has a result: its calendar for this
+    series, the confirmed rider moves and the retirements. Only what is
+    known — no table of zeros, no guessed classes. `null` when there is no
+    coming season (its calendar is not in) or this series has already begun
+    it (its standings exist; then it is an ordinary season)."""
+    ser = series.upper()
+    have = query(
+        """
+        SELECT max(se.year) AS y FROM standings st
+        JOIN seasons se ON se.id = st.season_id
+        JOIN series  s  ON s.id  = se.series_id
+        WHERE s.abbrev = %s
+        """, [ser])
+    last = (have[0]["y"] if have else None) or (_current_year() - 1)
+    nxt = _upcoming_season(last)
+    if nxt is None:
+        return None
+    cal = query(
+        """
+        SELECT count(*) AS rounds, min(e.event_date) AS first_date,
+               max(e.event_date) AS last_date
+        FROM events e
+        JOIN seasons se ON se.id = e.season_id
+        JOIN series  s  ON s.id  = se.series_id
+        WHERE s.abbrev = %s AND se.year = %s
+        """, [ser, nxt])[0]
+    # A move is a bike or a team that differs from what the rider raced last
+    # season (or a rider with no last season at all). Last season's bike is
+    # the one the official tables list him on (standings.bike), not our
+    # rider_seasons row: those were written from the riders table, which by
+    # then could already hold the NEW team (McElrath's 2026 row says Beta;
+    # he raced a Honda). Last season's team is shown only where its bike
+    # does not contradict the official one. Ordered by how high he finished last
+    # season, so the names people know come first.
+    moves = query(
+        """
+        WITH last_bike AS (
+            SELECT DISTINCT ON (st.rider_id) st.rider_id, st.bike,
+                   min(st.position) OVER (PARTITION BY st.rider_id) AS best_last
+            FROM standings st
+            JOIN seasons se ON se.id = st.season_id
+            JOIN series  s  ON s.id  = se.series_id
+            WHERE se.year = %s
+            ORDER BY st.rider_id, (st.bike IS NULL), s.id
+        )
+        SELECT * FROM (
+            SELECT ri.id AS rider_id, ri.full_name,
+                   COALESCE(ri.headshot_override, ri.headshot_racerx, ri.headshot_url) AS headshot_url,
+                   CASE WHEN lb.bike IS NULL OR prev.manufacturer IS NULL
+                          OR lower(prev.manufacturer) = lower(lb.bike)
+                        THEN prev.team END AS from_team,
+                   COALESCE(lb.bike, prev.manufacturer) AS from_make,
+                   cur.team AS to_team, cur.manufacturer AS to_make, cur.source,
+                   lb.best_last,
+                   (prev.rider_id IS NULL AND lb.rider_id IS NULL) AS new_rider
+            FROM rider_seasons cur
+            JOIN riders ri ON ri.id = cur.rider_id
+            LEFT JOIN rider_seasons prev
+                   ON prev.rider_id = cur.rider_id AND prev.year = %s
+            LEFT JOIN last_bike lb ON lb.rider_id = cur.rider_id
+            WHERE cur.year = %s
+        ) m
+        WHERE new_rider
+           OR lower(coalesce(from_make, '')) <> lower(coalesce(to_make, ''))
+           OR (from_team IS NOT NULL
+               AND lower(from_team) <> lower(coalesce(to_team, '')))
+        ORDER BY best_last NULLS LAST, full_name
+        """, [nxt - 1, nxt - 1, nxt])
+    retired = query(
+        """
+        SELECT id AS rider_id, full_name, retired_after,
+               COALESCE(headshot_override, headshot_racerx, headshot_url) AS headshot_url
+        FROM riders WHERE retired_after = %s ORDER BY full_name
+        """, [nxt - 1])
+    return {
+        "year": nxt,
+        "series": ser,
+        "rounds": cal["rounds"],
+        "first_date": cal["first_date"],
+        "last_date": cal["last_date"],
+        "starts": _season_start(ser, nxt),
+        "moves": moves,
+        "retired": retired,
     }
 
 
