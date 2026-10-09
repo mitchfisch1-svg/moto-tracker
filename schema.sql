@@ -200,6 +200,12 @@ ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_racerx TEXT;
 ALTER TABLE standings ADD COLUMN IF NOT EXISTS round_finishes INTEGER[];
 -- The bike the official table lists the rider on, for that championship.
 ALTER TABLE standings ADD COLUMN IF NOT EXISTS bike TEXT;
+-- A season row's scope, hand-curated from the announcement: series = 'SX'
+-- for a Supercross-only deal (NULL = no limit announced); kind = 'arrival'
+-- for a rider coming in full-time from elsewhere (MXGP), whose team name
+-- may not change at all.
+ALTER TABLE rider_seasons ADD COLUMN IF NOT EXISTS series TEXT;
+ALTER TABLE rider_seasons ADD COLUMN IF NOT EXISTS kind TEXT;
 -- Last-Modified of the Feld image + when we last asked, so audit_headshots.py
 -- can flag riders whose photo predates their team change (= last season's kit).
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_source_mtime TIMESTAMPTZ;

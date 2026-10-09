@@ -36,22 +36,35 @@ def test_an_announced_move_and_where_his_season_starts(monkeypatch):
     p = main._rider_preview(5, {"retired_after": None}, rows, [2026])
     assert p["year"] == 2027 and p["team"] == "Team Tedder Husqvarna"
     assert p["source"] == "news" and not p["retired"]
-    assert p["starts"]["venue"] == "Angel Stadium"
+    # Both openers: which series he races is not inferred from last season.
+    assert [x["venue"] for x in p["starts"]] == ["Angel Stadium", "Fox Raceway"]
 
 
 def test_nothing_announced_is_said_as_nothing_not_guessed(monkeypatch):
+    """Jett Lawrence raced no 2026 Supercross; that is no reason to tell him
+    his 2027 starts in May."""
     monkeypatch.setattr(main, "query", _fake_query(None))
     p = main._rider_preview(5, {"retired_after": None},
                             [{"series": "MX", "year": 2026}], [2026])
     assert p["team"] is None and p["manufacturer"] is None and p["number"] is None
-    assert p["starts"]["venue"] == "Fox Raceway"       # an MX-only rider starts in May
+    assert [x["series"] for x in p["starts"]] == ["SX", "MX"]
+
+
+def test_a_supercross_only_deal_starts_only_in_supercross(monkeypatch):
+    monkeypatch.setattr(main, "query", _fake_query(
+        {"team": "Liqui Moly Beta Factory Racing", "manufacturer": "Beta",
+         "number": None, "class": "450", "source": "news", "series": "SX",
+         "kind": None}))
+    p = main._rider_preview(5, {"retired_after": None},
+                            [{"series": "SX", "year": 2026}], [2026])
+    assert [x["series"] for x in p["starts"]] == ["SX"] and p["series_only"] == "SX"
 
 
 def test_a_retired_rider_has_no_season_to_start(monkeypatch):
     monkeypatch.setattr(main, "query", _fake_query(None))
     p = main._rider_preview(5, {"retired_after": 2026},
                             [{"series": "SX", "year": 2026}], [2026])
-    assert p["retired"] and p["retired_after"] == 2026 and p["starts"] is None
+    assert p["retired"] and p["retired_after"] == 2026 and p["starts"] == []
 
 
 def test_no_preview_without_a_calendar(monkeypatch):
