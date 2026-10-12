@@ -29,6 +29,8 @@ rider_move_candidates, so the pending ones can be reviewed:
     python -m src.pipeline.watch_moves            # scan and apply
     python -m src.pipeline.watch_moves --dry-run  # show what it would do
     python -m src.pipeline.watch_moves --pending  # what is waiting for a person
+    python -m src.pipeline.watch_moves --reviewed 12 40   # dealt with
+    python -m src.pipeline.watch_moves --ignore 63        # not a move
 """
 
 import argparse
@@ -234,7 +236,13 @@ def scan(conn, today=None, dry_run=False):
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (article_id, rider_id) DO UPDATE
                     SET kind = EXCLUDED.kind, team = EXCLUDED.team,
-                        class = EXCLUDED.class, status = EXCLUDED.status
+                        class = EXCLUDED.class,
+                        -- A person's decision stands: the hourly scan used to
+                        -- put every reviewed headline back to 'pending'.
+                        status = CASE WHEN rider_move_candidates.status
+                                          IN ('reviewed', 'ignored')
+                                      THEN rider_move_candidates.status
+                                      ELSE EXCLUDED.status END
                 """, row)
     for rid, cls, team, title, url in applied:
         n = rider_seasons.record(
@@ -251,11 +259,24 @@ def scan(conn, today=None, dry_run=False):
     return applied, decided
 
 
+def mark(conn, ids, status):
+    """A person's decision on candidates: 'reviewed' (true, and dealt with)
+    or 'ignored' (not a move). The hourly scan leaves these alone."""
+    if status not in ("reviewed", "ignored"):
+        raise ValueError(status)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE rider_move_candidates SET status = %s WHERE id = ANY(%s)",
+                    (status, list(ids)))
+        n = cur.rowcount
+    conn.commit()
+    return n
+
+
 def pending(conn):
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT r.full_name, c.kind, c.team, a.title, a.url, c.seen_at::date
+            SELECT c.id, r.full_name, c.kind, c.team, a.title, a.url, c.seen_at::date
             FROM rider_move_candidates c
             JOIN riders r ON r.id = c.rider_id
             JOIN news_articles a ON a.id = c.article_id
@@ -271,8 +292,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--pending", action="store_true")
+    ap.add_argument("--reviewed", type=int, nargs="+", metavar="ID",
+                    help="mark candidates dealt with (ids from --pending)")
+    ap.add_argument("--ignore", type=int, nargs="+", metavar="ID",
+                    help="mark candidates as not a move")
     args = ap.parse_args()
     with get_connection() as conn:
+        if args.reviewed or args.ignore:
+            for ids, st in ((args.reviewed, "reviewed"), (args.ignore, "ignored")):
+                if ids:
+                    print(f"{mark(conn, ids, st)} marked {st}")
+            return
         if args.pending:
             for row in pending(conn):
                 print("  ", " | ".join(str(x) for x in row))
