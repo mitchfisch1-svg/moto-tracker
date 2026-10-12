@@ -1335,6 +1335,7 @@ def _rider_preview(rider_id, info, standings_rows, seasons):
         "source": rs.get("source"),
         "series_only": rs.get("series"),
         "kind": rs.get("kind"),
+        "class": rs.get("class"),
         "starts": starts,
     }
 
@@ -1382,7 +1383,14 @@ def season_preview(series: str):
             -- first other one: McElrath was a Honda in Supercross and a Beta
             -- by the playoffs.
             SELECT DISTINCT ON (st.rider_id) st.rider_id, st.bike,
-                   min(st.position) OVER (PARTITION BY st.rider_id) AS best_last
+                   min(st.position) OVER (PARTITION BY st.rider_id) AS best_last,
+                   -- last season's class IN THIS SERIES ("250 West" -> 250)
+                   (SELECT split_part(st2.class, ' ', 1) FROM standings st2
+                      JOIN seasons se2 ON se2.id = st2.season_id
+                      JOIN series  s2  ON s2.id  = se2.series_id
+                     WHERE st2.rider_id = st.rider_id AND se2.year = se.year
+                       AND s2.abbrev = %s AND st2.class <> 'WMX'
+                     LIMIT 1) AS from_class
             FROM standings st
             JOIN seasons se ON se.id = st.season_id
             JOIN series  s  ON s.id  = se.series_id
@@ -1398,6 +1406,7 @@ def season_preview(series: str):
                    COALESCE(lb.bike, prev.manufacturer) AS from_make,
                    cur.team AS to_team, cur.manufacturer AS to_make, cur.source,
                    cur.kind, cur.series AS series_only,
+                   lb.from_class, cur.class AS to_class,
                    lb.best_last,
                    (prev.rider_id IS NULL AND lb.rider_id IS NULL) AS new_rider
             FROM rider_seasons cur
@@ -1413,11 +1422,14 @@ def season_preview(series: str):
            -- Coming in full-time from abroad: the Coenens' MXGP and US teams
            -- share a name, so no team or bike comparison would find them.
            OR kind = 'arrival'
+           -- Stepping up a class with the same team is still a move.
+           OR (from_class IS NOT NULL AND to_class IS NOT NULL
+               AND from_class <> to_class)
            OR lower(coalesce(from_make, '')) <> lower(coalesce(to_make, ''))
            OR (from_team IS NOT NULL
                AND lower(from_team) <> lower(coalesce(to_team, '')))
         ORDER BY best_last NULLS LAST, full_name
-        """, [nxt - 1, ser, nxt - 1, nxt, ser])
+        """, [ser, nxt - 1, ser, nxt - 1, nxt, ser])
     retired = query(
         """
         SELECT id AS rider_id, full_name, retired_after,

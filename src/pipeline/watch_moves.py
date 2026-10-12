@@ -13,6 +13,11 @@ Every headline from the last WINDOW_DAYS days is checked for a rider we know:
               recognise: applied as source 'news' once two or more outlets
               report it (src/rider_seasons.py: entry lists and results still
               outrank it)
+    class     a step up to the 450 class ("moves up to 450SX", "450
+              Supercross debut") with no team change to sign for: the class
+              is applied once two or more outlets report it. Deegan raced
+              250SX in 2026 and 450 outdoors; a headline saying he moves up
+              had no signing verb and no new team, so it was never seen.
     pending   everything else that mentions a move (a departure, a team we do
               not recognise, a single outlet): waits for a person
     known     a signing for a rider who already has that season's team (from
@@ -49,6 +54,14 @@ _SIGN = re.compile(r"\b(signs?|signed|signing|joins?|joined|inks?|inked|"
 _LEAVE = re.compile(r"\b(parts? ways|part ways|leav(es|ing)|depart(s|ure|ing)?|"
                     r"retire(s|d|ment)?|retiring|not return(ing)?|free agents?|"
                     r"without a ride)\b", re.I)
+# A step up is said with a verb of moving. "450 class win", "450 debut" and
+# "races the 450" also describe one-off wildcard rides: Deegan's 450 starts at
+# World Supercross in late 2025 came before a 2026 on the 250 in Supercross.
+_STEP_UP = re.compile(r"\b(moves? up|moving up|steps? up|stepping up|graduat\w*|"
+                      r"(goes|going|heads?|headed|moves?|moving) (to )?(the )?450|"
+                      r"full[- ]time 450)", re.I)
+_ONE_OFF = re.compile(r"\b(wild ?card|one[- ]off|world supercross|wsx|fill[- ]in|"
+                      r"replacement|for the (round|race|weekend))\b", re.I)
 _RUMOUR = re.compile(r"\b(rumou?rs?|reportedly|expected|could|might|linked|"
                      r"likely|set to|in talks)\b|\?", re.I)
 
@@ -114,6 +127,9 @@ def classify(title, summary, teams):
         return "rumour", None
     if _SIGN.search(title or ""):
         return "signing", _team_in(f"{title} {summary or ''}", teams)
+    if (_STEP_UP.search(title or "") and re.search(r"450", title or "")
+            and not _ONE_OFF.search(f"{title} {summary or ''}")):
+        return "class", _team_in(f"{title} {summary or ''}", teams)
     if _LEAVE.search(title or "") or _LEAVE.search(summary or ""):
         return "departure", None
     return None, None
@@ -158,26 +174,36 @@ def scan(conn, today=None, dry_run=False):
             kind, team = classify(title, summary, teams)
             if not kind:
                 continue
-            c = re.search(r"\b(450|250)\b", title or "")
+            c = re.search(r"(450|250)(?=\b|sx|mx)", title or "", re.I)
+            if kind == "class":
+                c = re.search(r"(450)", title or "")
             found.append((aid, rid, kind, team, c.group(1) if c else cls,
                           source_id, title, url))
 
     # A signing goes in when enough different outlets report the same rider
     # joining the same team.
     outlets = defaultdict(set)
+    steps = defaultdict(set)      # rider -> outlets reporting a step up to 450
     for aid, rid, kind, team, _c, src, _t, _u in found:
         if kind == "signing" and team:
             outlets[(rid, team)].add(src)
-    applied, decided = [], []
+        if kind == "class":
+            steps[rid].add(src)
+    applied, decided, classed = [], [], []
     for aid, rid, kind, team, cls, src, title, url in found:
         if kind == "rumour":
             status = "rumour"
         elif kind == "signing" and team and len(outlets[(rid, team)]) >= MIN_OUTLETS:
             status = "applied"
+        elif kind == "class" and len(steps[rid]) >= MIN_OUTLETS:
+            status = "applied"
         else:
             status = "pending"
         decided.append((aid, rid, season, kind, team, cls, status))
-        if status == "applied" and (rid, team) not in {(a[0], a[2]) for a in applied}:
+        if kind == "class" and status == "applied":
+            if rid not in {c[0] for c in classed}:
+                classed.append((rid, title, url))
+        elif status == "applied" and (rid, team) not in {(a[0], a[2]) for a in applied}:
             applied.append((rid, cls, team, title, url))
 
     # Only riders with no team yet for that season. A second move, or one that
@@ -187,7 +213,10 @@ def scan(conn, today=None, dry_run=False):
         cur.execute("SELECT rider_id FROM rider_seasons WHERE year = %s", (season,))
         have = {r[0] for r in cur.fetchall()}
     for i, (aid, rid, s_, kind, team, cls, status) in enumerate(decided):
-        if status == "applied" and rid in have:
+        # A class step-up may land on a rider who already has a team for the
+        # season: it only adds the class (rider_seasons.record keeps entry
+        # lists and results above it).
+        if status == "applied" and rid in have and kind != "class":
             decided[i] = (aid, rid, s_, kind, team, cls, "known")
     applied = [a for a in applied if a[0] not in have]
 
@@ -213,6 +242,11 @@ def scan(conn, today=None, dry_run=False):
             "news", note=f"auto: {title} ({url})")
         if n:
             log.info("moves: %s -> %s (%s)", riders[rid][0], team, season)
+    for rid, title, url in classed:
+        n = rider_seasons.record(conn, season, [(rid, None, None, None, "450")],
+                                 "news", note=f"auto: {title} ({url})")
+        if n:
+            log.info("moves: %s steps up to 450 (%s)", riders[rid][0], season)
     conn.commit()
     return applied, decided
 
