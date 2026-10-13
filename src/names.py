@@ -97,6 +97,9 @@ def titlecase_name(raw):
             out.append(word.upper())               # III, JR. stay shouted
         elif bare.startswith("MC") and len(bare) > 3:
             out.append("Mc" + word[2:].title())    # McGrath, not Mcgrath
+        elif len(bare) == 2 and bare.isalpha() and not re.search(r"[AEIOUY]", bare):
+            out.append(word.upper())               # CJ, TJ, JJ: initials, not "Cj"
+                                                   # (Ty, Jo, De have vowels: names)
         else:
             out.append(word.title())               # O'BRIEN -> O'Brien
     return " ".join(out)

@@ -98,3 +98,12 @@ def test_a_region_tag_does_not_hide_a_shouted_name():
     assert titlecase_name("TRE FIERRO III (East)") == "Tre Fierro III (East)"
     assert titlecase_name("Haiden Deegan (West)") == "Haiden Deegan (West)"
     assert titlecase_name("HAIDEN DEEGAN (WEST)") == "Haiden Deegan (West)"
+
+
+def test_two_letter_initials_stay_capitals():
+    """The 2027 preview listed "Cj Benard"."""
+    assert titlecase_name("CJ BENARD") == "CJ Benard"
+    assert titlecase_name("TJ LANPHEAR") == "TJ Lanphear"
+    assert titlecase_name("JJ CONCANNON") == "JJ Concannon"
+    assert titlecase_name("TY MASTERPOOL") == "Ty Masterpool"   # a name, not initials
+    assert titlecase_name("JESSON TURNER JR") == "Jesson Turner JR"

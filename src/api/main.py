@@ -1426,8 +1426,11 @@ def season_preview(series: str):
            OR (from_class IS NOT NULL AND to_class IS NOT NULL
                AND from_class <> to_class)
            OR lower(coalesce(from_make, '')) <> lower(coalesce(to_make, ''))
+           -- Spelling is not a move: "Redbull KTM" and "Red Bull KTM" are one
+           -- team (Beaumer re-signed; he did not change teams).
            OR (from_team IS NOT NULL
-               AND lower(from_team) <> lower(coalesce(to_team, '')))
+               AND regexp_replace(lower(from_team), '[^a-z0-9]', '', 'g')
+                   <> regexp_replace(lower(coalesce(to_team, '')), '[^a-z0-9]', '', 'g'))
         ORDER BY best_last NULLS LAST, full_name
         """, [ser, nxt - 1, ser, nxt - 1, nxt, ser])
     retired = query(
