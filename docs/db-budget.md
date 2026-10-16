@@ -1,5 +1,12 @@
 # Database compute budget
 
+> **Update 2026-10-16:** the project is on Neon's **Launch** plan (paid, usage-based):
+> the free 100 CU-hour cap no longer applies, so running out can't take the app
+> down any more; compute is billed instead (25.5 CU-hours = $2.70 for Oct 1-16).
+> Waking the database less still saves money: since 10-16 the API caches read
+> answers in memory and expires them together after the hour (`_response_cache`
+> in src/api/main.py). Everything below is the history of the free-plan outage.
+
 The app runs on Neon's Free plan: **100 CU-hours of compute per project per
 month**, reset at the start of the billing period. Storage is not the
 constraint — compute time is. This note exists because we exceeded it once and
