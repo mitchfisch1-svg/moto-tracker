@@ -21,7 +21,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -399,6 +400,82 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+# --- response cache -------------------------------------------------------------
+# Neon's free plan allows 100 compute-hours a month and keeps the database
+# awake for 5 minutes after every query; it ran out on 07-31 and the whole app
+# went dark (docs/db-budget.md). Between race weekends nothing a reader sees
+# changes faster than the hourly pipeline, so read endpoints answer from memory,
+# and every cached answer expires together ten minutes past the hour: an hour
+# of readers wakes the database about once, not once per screen per person.
+# From 36 h before a start to 12 h after, answers live a minute. Live timing,
+# health and everything that is not a plain read are never cached.
+_CACHEABLE = re.compile(
+    r"^/(series|schedule(/next)?|standings(/years|/manufacturers)?"
+    r"|news(/top|/article/\d+)?|riders(/\d+)?|season-preview|season-lineup"
+    r"|rundown|recap|events/\d+|videos|podcasts|compare|widget/(next|standings))$")
+_RESP_CACHE: dict = {}          # key -> (expires_at, body bytes, headers)
+_RESP_CACHE_MAX = 3000
+_RACE_WEEKEND_TTL = 60
+_RACE_PRE_S, _RACE_POST_S = 36 * 3600, 12 * 3600
+_busy = [0.0, True]             # [recheck_at, race weekend near?]
+
+
+def _race_weekend_near(now=None) -> bool:
+    """Is a start within 36 h ahead or 12 h behind? One query, then trusted
+    until it could change: up to six hours when the paddock is empty."""
+    now = now or time.time()
+    if now < _busy[0]:
+        return _busy[1]
+    try:
+        rows = query(
+            "SELECT extract(epoch FROM min(start_time_utc)) AS s FROM events "
+            "WHERE start_time_utc > now() - make_interval(hours => 12)")
+        start = rows[0]["s"] if rows else None
+    except Exception:
+        _busy[:] = [now + 60, True]     # cannot tell: keep answers short-lived
+        return True
+    if start is None:
+        _busy[:] = [now + 6 * 3600, False]
+    else:
+        start = float(start)
+        near = now >= start - _RACE_PRE_S
+        _busy[:] = [now + 300 if near else min(start - _RACE_PRE_S, now + 6 * 3600), near]
+    return _busy[1]
+
+
+def _cache_expiry(now) -> float:
+    if _race_weekend_near(now):
+        return now + _RACE_WEEKEND_TTL
+    return (now // 3600 + 1) * 3600 + 600     # 10 past the next hour, for everyone
+
+
+def _cache_key(request) -> str:
+    q = "&".join(f"{k}={v}" for k, v in sorted(request.query_params.multi_items()))
+    return f"{request.url.path}?{q}"
+
+
+@app.middleware("http")
+async def _response_cache(request, call_next):
+    if request.method != "GET" or not _CACHEABLE.match(request.url.path):
+        return await call_next(request)
+    key, now = _cache_key(request), time.time()
+    hit = _RESP_CACHE.get(key)
+    if hit and hit[0] > now:
+        return Response(content=hit[1], status_code=200,
+                        headers={**hit[2], "x-cache": "hit"})
+    response = await call_next(request)
+    if response.status_code != 200:
+        return response
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+    expires = await run_in_threadpool(_cache_expiry, now)
+    if len(_RESP_CACHE) >= _RESP_CACHE_MAX:
+        for k in [k for k, v in _RESP_CACHE.items() if v[0] <= now] or list(_RESP_CACHE)[:500]:
+            _RESP_CACHE.pop(k, None)
+    _RESP_CACHE[key] = (expires, body, headers)
+    return Response(content=body, status_code=200, headers={**headers, "x-cache": "miss"})
 
 
 def query(sql: str, params=()):
@@ -2152,6 +2229,18 @@ def _combined_qualifying(race_name, live_riders):
             for i, x in enumerate(ranked)
         ],
     }
+
+
+@app.post("/debug/cache-clear")
+def debug_cache_clear(key: str = ""):
+    """Drop every cached answer (after a hand-made data fix). Guarded by
+    MXT_MOCK_KEY like the mock: a wrong or unset key is a 404."""
+    want = os.environ.get("MXT_MOCK_KEY")
+    if not want or key != want:
+        raise HTTPException(status_code=404, detail="Not Found")
+    n = len(_RESP_CACHE)
+    _RESP_CACHE.clear()
+    return {"cleared": n}
 
 
 @app.post("/debug/mock-race")
