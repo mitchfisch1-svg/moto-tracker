@@ -1451,6 +1451,168 @@ def season_preview(series: str):
     }
 
 
+def _team_key(team):
+    """A team name with case, spaces and punctuation gone: "Redbull KTM" and
+    "Red Bull KTM" are one team."""
+    return "".join(ch for ch in (team or "").lower() if ch.isalnum())
+
+
+def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids):
+    """One class's coming-season lineup, from what is known. Pure, so it can
+    be tested without a database.
+
+      std     last season's standings rows in THIS series: rider_id, class,
+              position, bike, full_name, headshot_url
+      cur     the coming season's rider_seasons rows: rider_id, team,
+              manufacturer, class, series, kind, source, full_name,
+              headshot_url, best_last
+      prev    {rider_id: last season's rider_seasons row}
+      bikes   {rider_id: last season's official bike in any series}
+      retired_ids  riders who retired after last season
+
+    `confirmed` — riders whose coming-season class in this series is known
+    (announced, or from an entry list), with what changed. `not_confirmed`
+    — last season's riders of this class with nothing known yet (or a new
+    deal that names no class), dimmed in the app; never a guess at where
+    they will be. `retired` — last season's riders of this class who
+    retired. A 250 rider's region is shown only when it was announced:
+    otherwise he is on both SX 250 lists, marked so.
+    """
+    base = (cls or "").split(" ")[0].upper()
+    region = cls.split(" ", 1)[1] if ser == "SX" and " " in (cls or "") else None
+    mine = {r["rider_id"]: r for r in std if r["class"] == cls}
+    last_cls = {}
+    for r in std:
+        last_cls.setdefault(r["rider_id"], r["class"].split(" ")[0])
+    last_bike = {r["rider_id"]: r["bike"] for r in std if r.get("bike")}
+
+    confirmed, placed, elsewhere = [], set(), set()
+    for c in cur:
+        rid = c["rider_id"]
+        if rid in retired_ids:
+            continue
+        if c.get("series") and c["series"] != ser:
+            elsewhere.add(rid)          # a Supercross-only deal: not in Pro Motocross
+            continue
+        if not c.get("class"):
+            continue                    # a new deal that names no class
+        placed.add(rid)
+        c_base, _, c_region = c["class"].partition(" ")
+        if c_base.upper() != base:
+            continue
+        if region and c_region and c_region.lower() != region.lower():
+            continue
+        p = prev.get(rid) or {}
+        from_make = last_bike.get(rid) or bikes.get(rid) or p.get("manufacturer")
+        # Last season's team only where its bike doesn't contradict the
+        # official one (McElrath's 2026 row had his 2027 Beta team in it).
+        from_team = p.get("team") if (not p.get("manufacturer") or not from_make
+                                      or p["manufacturer"].lower() == from_make.lower()) else None
+        confirmed.append({
+            "rider_id": rid, "full_name": c["full_name"],
+            "headshot_url": c.get("headshot_url"),
+            "team": c.get("team"), "manufacturer": c.get("manufacturer"),
+            "source": c.get("source"), "kind": c.get("kind"),
+            "series_only": c.get("series"),
+            "region_known": bool(c_region) if ser == "SX" and base == "250" else None,
+            "from_team": from_team, "from_make": from_make,
+            "from_class": last_cls.get(rid),
+            "to_class": c_base,
+            "moved": bool(
+                c.get("kind") == "arrival"
+                or (last_cls.get(rid) and last_cls[rid] != c_base)
+                or (from_make and c.get("manufacturer")
+                    and from_make.lower() != c["manufacturer"].lower())
+                or (from_team and _team_key(from_team) != _team_key(c.get("team")))),
+            "best_last": c.get("best_last"),
+        })
+    confirmed.sort(key=lambda r: (r["best_last"] is None, r["best_last"] or 0, r["full_name"]))
+
+    new_deal = {c["rider_id"]: c for c in cur
+                if not c.get("class") and (not c.get("series") or c["series"] == ser)}
+    not_confirmed, retired = [], []
+    for rid, r in sorted(mine.items(), key=lambda kv: kv[1]["position"] or 999):
+        if rid in retired_ids:
+            retired.append({"rider_id": rid, "full_name": r["full_name"],
+                            "headshot_url": r.get("headshot_url"),
+                            "position": r["position"]})
+            continue
+        if rid in placed or rid in elsewhere:
+            continue
+        d = new_deal.get(rid)
+        not_confirmed.append({
+            "rider_id": rid, "full_name": r["full_name"],
+            "headshot_url": r.get("headshot_url"),
+            "last_position": r["position"], "last_make": r.get("bike"),
+            "last_team": (prev.get(rid) or {}).get("team"),
+            # Re-signed, but the deal named no class: said as such.
+            "new_team": d.get("team") if d else None,
+            "new_make": d.get("manufacturer") if d else None,
+        })
+    return {"confirmed": confirmed, "not_confirmed": not_confirmed, "retired": retired}
+
+
+def _preview_year(ser):
+    """The coming season for one series, while it has no standings yet."""
+    have = query(
+        """
+        SELECT max(se.year) AS y FROM standings st
+        JOIN seasons se ON se.id = st.season_id
+        JOIN series  s  ON s.id  = se.series_id
+        WHERE s.abbrev = %s
+        """, [ser])
+    last = (have[0]["y"] if have else None) or (_current_year() - 1)
+    return _upcoming_season(last)
+
+
+@app.get("/season-lineup")
+def season_lineup(series: str, klass: str = Query(..., alias="class")):
+    """One class's lineup for the coming season, before it has a result:
+    confirmed riders (with what changed), last season's riders not confirmed
+    yet, and retirements. `null` once the season has standings — then the
+    real table is the answer."""
+    ser = series.upper()
+    nxt = _preview_year(ser)
+    if nxt is None:
+        return None
+    std = query(
+        """
+        SELECT st.rider_id, st.class, st.position, st.bike, r.full_name,
+               COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url
+        FROM standings st
+        JOIN seasons se ON se.id = st.season_id
+        JOIN series  s  ON s.id  = se.series_id
+        JOIN riders  r  ON r.id  = st.rider_id
+        WHERE s.abbrev = %s AND se.year = %s
+        """, [ser, nxt - 1])
+    cur = query(
+        """
+        SELECT rs.rider_id, rs.team, rs.manufacturer, rs.class, rs.series, rs.kind,
+               rs.source, r.full_name,
+               COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url,
+               (SELECT min(st.position) FROM standings st
+                  JOIN seasons se ON se.id = st.season_id
+                 WHERE st.rider_id = rs.rider_id AND se.year = %s) AS best_last
+        FROM rider_seasons rs JOIN riders r ON r.id = rs.rider_id
+        WHERE rs.year = %s
+        """, [nxt - 1, nxt])
+    prev = {r["rider_id"]: r for r in query(
+        "SELECT rider_id, team, manufacturer FROM rider_seasons WHERE year = %s", [nxt - 1])}
+    bikes = {}
+    for r in query(
+            """
+            SELECT st.rider_id, st.bike FROM standings st
+            JOIN seasons se ON se.id = st.season_id
+            JOIN series  s  ON s.id  = se.series_id
+            WHERE se.year = %s AND st.bike IS NOT NULL ORDER BY s.id
+            """, [nxt - 1]):
+        bikes.setdefault(r["rider_id"], r["bike"])
+    retired_ids = {r["id"] for r in query(
+        "SELECT id FROM riders WHERE retired_after IS NOT NULL AND retired_after < %s", [nxt])}
+    out = build_lineup(ser, klass, std, cur, prev, bikes, retired_ids)
+    return dict(out, year=nxt, series=ser, **{"class": klass})
+
+
 def _season_line(rows, races, year):
     """A rider's season in ROUNDS, built from the championship rows shown under
     it so the two can never disagree. It used to count every main and moto:
