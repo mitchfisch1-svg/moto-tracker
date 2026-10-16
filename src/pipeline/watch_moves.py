@@ -176,10 +176,12 @@ def scan(conn, today=None, dry_run=False):
             kind, team = classify(title, summary, teams)
             if not kind:
                 continue
-            c = re.search(r"(450|250)(?=\b|sx|mx)", title or "", re.I)
+            # The class the ARTICLE names (headline, then summary), or none:
+            # last season's class copied forward would be a guess.
+            c = re.search(r"(450|250)(?=\b|sx|mx|\s?sx-?f)", f"{title} {summary or ''}", re.I)
             if kind == "class":
                 c = re.search(r"(450)", title or "")
-            found.append((aid, rid, kind, team, c.group(1) if c else cls,
+            found.append((aid, rid, kind, team, c.group(1) if c else None,
                           source_id, title, url))
 
     # A signing goes in when enough different outlets report the same rider

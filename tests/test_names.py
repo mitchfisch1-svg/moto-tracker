@@ -107,3 +107,7 @@ def test_two_letter_initials_stay_capitals():
     assert titlecase_name("JJ CONCANNON") == "JJ Concannon"
     assert titlecase_name("TY MASTERPOOL") == "Ty Masterpool"   # a name, not initials
     assert titlecase_name("JESSON TURNER JR") == "Jesson Turner JR"
+
+
+def test_a_known_surname_keeps_its_own_capitals():
+    assert titlecase_name("RYDER DIFRANCESCO") == "Ryder DiFrancesco"

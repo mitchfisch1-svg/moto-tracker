@@ -56,6 +56,9 @@ def slug_variants(full_name: str) -> list[str]:
 # Suffixes a plain .title() mangles. "III" becomes "Iii", which is how the app
 # ended up listing a rider called "Will Canaguier Iii".
 _NAME_SUFFIXES = {"II", "III", "IV", "V", "VI", "JR", "SR"}
+# Surnames whose capitals no rule can know ("Di" is DiFrancesco but Dixon).
+# Spelled as the riders' own teams spell them.
+_NAME_FORMS = {"DIFRANCESCO": "DiFrancesco"}
 
 
 def _is_shouted(s: str) -> bool:
@@ -95,6 +98,8 @@ def titlecase_name(raw):
             out.append(word)
         elif bare in _NAME_SUFFIXES:
             out.append(word.upper())               # III, JR. stay shouted
+        elif bare in _NAME_FORMS:
+            out.append(_NAME_FORMS[bare])          # DiFrancesco
         elif bare.startswith("MC") and len(bare) > 3:
             out.append("Mc" + word[2:].title())    # McGrath, not Mcgrath
         elif len(bare) == 2 and bare.isalpha() and not re.search(r"[AEIOUY]", bare):

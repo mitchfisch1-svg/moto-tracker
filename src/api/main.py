@@ -1457,7 +1457,10 @@ def _team_key(team):
     return "".join(ch for ch in (team or "").lower() if ch.isalnum())
 
 
-def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids):
+_OTHER_SERIES_TOP = 20     # a rider from the other series' top 20 is someone people look for
+
+
+def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids, other=None):
     """One class's coming-season lineup, from what is known. Pure, so it can
     be tested without a database.
 
@@ -1469,6 +1472,10 @@ def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids):
       prev    {rider_id: last season's rider_seasons row}
       bikes   {rider_id: last season's official bike in any series}
       retired_ids  riders who retired after last season
+      other   last season's standings rows in the OTHER series (same shape
+              plus `series`): its top riders of this class are candidates too.
+              Jett Lawrence raced no 2026 Supercross, and a 2027 Supercross 450
+              list without him read as "not racing".
 
     `confirmed` — riders whose coming-season class in this series is known
     (announced, or from an entry list), with what changed. `not_confirmed`
@@ -1530,24 +1537,46 @@ def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids):
 
     new_deal = {c["rider_id"]: c for c in cur
                 if not c.get("class") and (not c.get("series") or c["series"] == ser)}
+    # Last season's riders of this class: this series first, then the other
+    # series' top riders of the same class who didn't race this one. A
+    # Supercross 250 region for an outdoors-only rider is unknown, so he is
+    # on both 250 lists, like a confirmed rider with no announced region.
+    cands = [dict(r, series=ser) for r in sorted(
+        mine.values(), key=lambda r: r["position"] or 999)]
+    # Anyone who raced THIS series last season belongs to the class he raced
+    # in it: Deegan (SX 250 West, MX 450) is not an SX 450 candidate, nor is
+    # Davies (SX 250 East) a 250 West one.
+    seen = {r["rider_id"] for r in std}
+    for r in sorted(other or [], key=lambda r: r["position"] or 999):
+        rid = r["rider_id"]
+        if (rid in seen or (r["position"] or 999) > _OTHER_SERIES_TOP
+                or r["class"].split(" ")[0].upper() != base):
+            continue
+        seen.add(rid)
+        cands.append(r)
     not_confirmed, retired = [], []
-    for rid, r in sorted(mine.items(), key=lambda kv: kv[1]["position"] or 999):
+    for r in cands:
+        rid = r["rider_id"]
         if rid in retired_ids:
-            retired.append({"rider_id": rid, "full_name": r["full_name"],
-                            "headshot_url": r.get("headshot_url"),
-                            "position": r["position"]})
+            if r["series"] == ser:
+                retired.append({"rider_id": rid, "full_name": r["full_name"],
+                                "headshot_url": r.get("headshot_url"),
+                                "position": r["position"]})
             continue
         if rid in placed or rid in elsewhere:
             continue
         d = new_deal.get(rid)
+        last_team = (prev.get(rid) or {}).get("team")
         not_confirmed.append({
             "rider_id": rid, "full_name": r["full_name"],
             "headshot_url": r.get("headshot_url"),
+            "last_series": r["series"],
             "last_position": r["position"], "last_make": r.get("bike"),
-            "last_team": (prev.get(rid) or {}).get("team"),
-            # Re-signed, but the deal named no class: said as such.
+            "last_team": last_team,
+            # A deal that named no class: re-signed only if it is the same team.
             "new_team": d.get("team") if d else None,
             "new_make": d.get("manufacturer") if d else None,
+            "re_signed": bool(d and _team_key(d.get("team")) == _team_key(last_team)),
         })
     return {"confirmed": confirmed, "not_confirmed": not_confirmed, "retired": retired}
 
@@ -1609,7 +1638,17 @@ def season_lineup(series: str, klass: str = Query(..., alias="class")):
         bikes.setdefault(r["rider_id"], r["bike"])
     retired_ids = {r["id"] for r in query(
         "SELECT id FROM riders WHERE retired_after IS NOT NULL AND retired_after < %s", [nxt])}
-    out = build_lineup(ser, klass, std, cur, prev, bikes, retired_ids)
+    other = query(
+        """
+        SELECT st.rider_id, st.class, st.position, st.bike, r.full_name, s.abbrev AS series,
+               COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url
+        FROM standings st
+        JOIN seasons se ON se.id = st.season_id
+        JOIN series  s  ON s.id  = se.series_id
+        JOIN riders  r  ON r.id  = st.rider_id
+        WHERE s.abbrev IN ('SX', 'MX') AND s.abbrev <> %s AND se.year = %s
+        """, [ser, nxt - 1])
+    out = build_lineup(ser, klass, std, cur, prev, bikes, retired_ids, other)
     return dict(out, year=nxt, series=ser, **{"class": klass})
 
 

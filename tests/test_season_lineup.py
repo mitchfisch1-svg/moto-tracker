@@ -85,3 +85,25 @@ def test_a_new_deal_naming_no_class_is_said_as_such():
     row = next(r for r in lineup("SX", "250 East")["not_confirmed"]
                if r["full_name"] == "Seth Hammaker")
     assert row["new_team"] == "Monster Energy Pro Circuit Kawasaki"
+
+
+def test_the_other_series_top_riders_are_candidates_too():
+    """Jett Lawrence raced no 2026 Supercross; the 2027 SX 450 list without
+    him read as "not racing"."""
+    other = [dict(std(9, "450", 2, "Honda", "Jett Lawrence"), series="MX"),
+             dict(std(10, "450", 40, "KTM", "Back Marker"), series="MX")]
+    out = build_lineup("SX", "450", STD_SX, CUR, PREV, {}, {3}, other)
+    row = next(r for r in out["not_confirmed"] if r["full_name"] == "Jett Lawrence")
+    assert row["last_series"] == "MX" and row["last_position"] == 2
+    assert "Back Marker" not in names(out["not_confirmed"])     # outside the top 20
+
+
+def test_re_signed_only_when_the_team_is_the_same():
+    prev = {**PREV, 6: {"team": "Monster Energy Pro Circuit Kawasaki", "manufacturer": "Kawasaki"}}
+    out = build_lineup("SX", "250 East", STD_SX, CUR, prev, {}, {3})
+    row = next(r for r in out["not_confirmed"] if r["full_name"] == "Seth Hammaker")
+    assert row["re_signed"] is True
+    moved = [dict(c, team="Some Other Team") if c["rider_id"] == 6 else c for c in CUR]
+    out = build_lineup("SX", "250 East", STD_SX, moved, prev, {}, {3})
+    row = next(r for r in out["not_confirmed"] if r["full_name"] == "Seth Hammaker")
+    assert row["re_signed"] is False
