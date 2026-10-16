@@ -21,8 +21,9 @@ RANK = {"news": 1, "entry_list": 2, "results": 3}
 
 _UPSERT = """
     INSERT INTO rider_seasons
-        (rider_id, year, number, team, manufacturer, class, source, note, updated_at)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+        (rider_id, year, number, team, manufacturer, class, source, note,
+         announced_class, updated_at)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
     ON CONFLICT (rider_id, year) DO UPDATE SET
         number       = COALESCE(EXCLUDED.number, rider_seasons.number),
         team         = COALESCE(EXCLUDED.team, rider_seasons.team),
@@ -30,6 +31,10 @@ _UPSERT = """
         class        = COALESCE(EXCLUDED.class, rider_seasons.class),
         source       = EXCLUDED.source,
         note         = EXCLUDED.note,
+        -- What an announcement said survives the entry lists and results
+        -- that outrank it: they speak for one series, it spoke for both.
+        announced_class = COALESCE(EXCLUDED.announced_class,
+                                   rider_seasons.announced_class),
         updated_at   = now()
     WHERE (CASE rider_seasons.source WHEN 'news' THEN 1 WHEN 'entry_list' THEN 2
                                      ELSE 3 END)
@@ -54,7 +59,8 @@ def record(conn, year, rows, source, note=None):
     with conn.cursor() as cur:
         for rider_id, number, team, make, cls in rows:
             cur.execute(_UPSERT, (rider_id, year, number, team, make, cls,
-                                  source, note))
+                                  source, note,
+                                  cls if source == "news" else None))
             n += cur.rowcount
             # The rider page shows the newest season we know. Never let an
             # older season's row move it backwards.

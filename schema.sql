@@ -206,6 +206,22 @@ ALTER TABLE standings ADD COLUMN IF NOT EXISTS bike TEXT;
 -- may not change at all.
 ALTER TABLE rider_seasons ADD COLUMN IF NOT EXISTS series TEXT;
 ALTER TABLE rider_seasons ADD COLUMN IF NOT EXISTS kind TEXT;
+-- The class an ANNOUNCEMENT gave (source 'news'). Entry lists and results
+-- overwrite `class`, but an A1 entry list says nothing about Pro Motocross:
+-- only an announcement (or that series' own entries) confirms a class there.
+ALTER TABLE rider_seasons ADD COLUMN IF NOT EXISTS announced_class TEXT;
+
+-- Who an entry list put in which series and class, per season. One row per
+-- rider/season/series/class; region is the SX 250 region when the event has one.
+CREATE TABLE IF NOT EXISTS rider_entries (
+    rider_id    INTEGER NOT NULL REFERENCES riders(id),
+    year        INTEGER NOT NULL,
+    series      TEXT NOT NULL,
+    class       TEXT NOT NULL,
+    region      TEXT,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (rider_id, year, series, class)
+);
 -- Last-Modified of the Feld image + when we last asked, so audit_headshots.py
 -- can flag riders whose photo predates their team change (= last season's kit).
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_source_mtime TIMESTAMPTZ;

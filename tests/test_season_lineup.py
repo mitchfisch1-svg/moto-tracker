@@ -20,8 +20,8 @@ def std(rid, cls, pos, bike, name):
 
 def cur(rid, team, make, cls, name, series=None, kind=None, best=None):
     return {"rider_id": rid, "team": team, "manufacturer": make, "class": cls,
-            "series": series, "kind": kind, "source": "news", "full_name": name,
-            "headshot_url": None, "best_last": best}
+            "announced_class": cls, "series": series, "kind": kind, "source": "news",
+            "full_name": name, "headshot_url": None, "best_last": best}
 
 
 STD_SX = [
@@ -107,3 +107,38 @@ def test_re_signed_only_when_the_team_is_the_same():
     out = build_lineup("SX", "250 East", STD_SX, moved, prev, {}, {3})
     row = next(r for r in out["not_confirmed"] if r["full_name"] == "Seth Hammaker")
     assert row["re_signed"] is False
+
+
+
+def test_an_a1_entry_list_confirms_supercross_not_pro_motocross():
+    """From the A1 entry list to May, the 2027 Motocross lineup called every
+    Supercross entrant confirmed for Motocross."""
+    roczen = dict(cur(1, "Pipes Motorsports Group Suzuki", "Suzuki", "450", "Ken Roczen"),
+                  source="entry_list", announced_class=None)
+    std_mx = [std(1, "450", 7, "Suzuki", "Ken Roczen")]
+    entered = {1: {"SX": "450"}}
+    sx = build_lineup("SX", "450", [std(1, "450", 1, "Suzuki", "Ken Roczen")], [roczen],
+                      {}, {}, set(), None, entered)
+    assert names(sx["confirmed"]) == ["Ken Roczen"]
+    mx = build_lineup("MX", "450", std_mx, [roczen], {}, {}, set(), None, entered)
+    assert names(mx["confirmed"]) == []
+    row = mx["not_confirmed"][0]
+    assert row["full_name"] == "Ken Roczen" and row["entered_other"] == ["SX"]
+
+
+def test_an_announcement_still_counts_after_an_entry_list_outranks_it():
+    """Prado's announced 450 stays confirmed for Pro Motocross after the A1
+    entry list overwrites his row's source."""
+    prado = dict(cur(43, "Red Bull KTM Factory Racing", "KTM", "450", "Jorge Prado"),
+                 source="entry_list")
+    mx = build_lineup("MX", "450", [std(43, "450", 4, "KTM", "Jorge Prado")], [prado],
+                      {}, {}, set(), None, {43: {"SX": "450"}})
+    assert names(mx["confirmed"]) == ["Jorge Prado"]
+
+
+def test_an_entry_list_region_puts_him_on_one_250_list():
+    rider = dict(cur(5, "Team X", "Honda", "250", "Some Rider"), announced_class=None,
+                 source="entry_list")
+    west = build_lineup("SX", "250 West", [], [rider], {}, {}, set(), None, {5: {"SX": "250 West"}})
+    east = build_lineup("SX", "250 East", [], [rider], {}, {}, set(), None, {5: {"SX": "250 West"}})
+    assert names(west["confirmed"]) == ["Some Rider"] and names(east["confirmed"]) == []

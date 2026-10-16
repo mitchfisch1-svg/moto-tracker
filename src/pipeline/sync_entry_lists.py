@@ -109,7 +109,25 @@ def find_smx_id(source_url, event_date, city, listed):
     return None
 
 
-def sync_event(conn, smx_id, year, label, resolver, dry_run=False):
+def _record_entries(conn, year, series, region, rows):
+    """Which series and class each rider entered: an A1 entry list confirms
+    Supercross, never Pro Motocross (the 2027 Motocross lineup counted every
+    Supercross entrant as confirmed until this existed)."""
+    with conn.cursor() as cur:
+        for rider_id, _num, _team, _make, cls in rows:
+            cur.execute(
+                """
+                INSERT INTO rider_entries (rider_id, year, series, class, region)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (rider_id, year, series, class) DO UPDATE
+                    SET region = COALESCE(EXCLUDED.region, rider_entries.region),
+                        updated_at = now()
+                """, (rider_id, year, series, cls,
+                      region if series == "SX" and cls == "250" else None))
+
+
+def sync_event(conn, smx_id, year, label, resolver, dry_run=False,
+               series=None, region=None):
     page = _get(f"{HOME}?p=view_event&id={smx_id}")
     seen, written = set(), 0
     for a in BeautifulSoup(page, "html.parser").find_all("a", href=True):
@@ -131,6 +149,8 @@ def sync_event(conn, smx_id, year, label, resolver, dry_run=False):
         if not dry_run:
             written += rider_seasons.record(conn, year, rows, "entry_list",
                                             note=f"{label} entry list")
+            if series:
+                _record_entries(conn, year, series, region, rows)
     return written
 
 
@@ -139,8 +159,10 @@ def sync(conn, days=ENTRY_WINDOW_DAYS, dry_run=False):
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT e.id, e.event_date, e.city, e.venue, e.source_url, se.year
+            SELECT e.id, e.event_date, e.city, e.venue, e.source_url, se.year,
+                   s.abbrev, e.region_250
             FROM events e JOIN seasons se ON se.id = e.season_id
+            JOIN series s ON s.id = se.series_id
             WHERE e.event_date BETWEEN current_date
                                    AND current_date + make_interval(days => %s)
             ORDER BY e.event_date
@@ -151,12 +173,14 @@ def sync(conn, days=ENTRY_WINDOW_DAYS, dry_run=False):
     listed = directory()
     resolver = RiderResolver(conn)
     total = 0
-    for _eid, when, city, venue, url, year in upcoming:
+    for _eid, when, city, venue, url, year, series, region in upcoming:
         smx = find_smx_id(url, when, city, listed)
         if not smx:
             log.info("entries: %s (%s) is not on the timing site yet", venue, when)
             continue
-        total += sync_event(conn, smx, year, venue, resolver, dry_run=dry_run)
+        total += sync_event(conn, smx, year, venue, resolver, dry_run=dry_run,
+                            series=series,
+                            region={"E": "East", "W": "West"}.get(region))
     if not dry_run:
         conn.commit()
     return total

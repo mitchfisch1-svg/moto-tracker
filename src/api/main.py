@@ -1460,7 +1460,8 @@ def _team_key(team):
 _OTHER_SERIES_TOP = 20     # a rider from the other series' top 20 is someone people look for
 
 
-def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids, other=None):
+def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids, other=None,
+                 entered=None):
     """One class's coming-season lineup, from what is known. Pure, so it can
     be tested without a database.
 
@@ -1476,6 +1477,13 @@ def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids, other=None):
               plus `series`): its top riders of this class are candidates too.
               Jett Lawrence raced no 2026 Supercross, and a 2027 Supercross 450
               list without him read as "not racing".
+      entered {rider_id: {series: class}} — the coming season's entry lists
+              and results, per series ("250 West" when the region is known).
+
+    A class counts as confirmed in THIS series only from an announcement
+    (`announced_class`, both series unless the deal is scoped) or from this
+    series' own entries. `class` alone is not enough: an A1 entry list writes
+    it for every Supercross rider and says nothing about Pro Motocross.
 
     `confirmed` — riders whose coming-season class in this series is known
     (announced, or from an entry list), with what changed. `not_confirmed`
@@ -1493,6 +1501,7 @@ def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids, other=None):
         last_cls.setdefault(r["rider_id"], r["class"].split(" ")[0])
     last_bike = {r["rider_id"]: r["bike"] for r in std if r.get("bike")}
 
+    entered = entered or {}
     confirmed, placed, elsewhere = [], set(), set()
     for c in cur:
         rid = c["rider_id"]
@@ -1501,9 +1510,11 @@ def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids, other=None):
         if c.get("series") and c["series"] != ser:
             elsewhere.add(rid)          # a Supercross-only deal: not in Pro Motocross
             continue
-        if not c.get("class"):
-            continue                    # a new deal that names no class
+        here = entered.get(rid, {}).get(ser) or c.get("announced_class")
+        if not here:
+            continue                    # nothing confirms a class in THIS series
         placed.add(rid)
+        c = dict(c, **{"class": here})
         c_base, _, c_region = c["class"].partition(" ")
         if c_base.upper() != base:
             continue
@@ -1536,7 +1547,8 @@ def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids, other=None):
     confirmed.sort(key=lambda r: (r["best_last"] is None, r["best_last"] or 0, r["full_name"]))
 
     new_deal = {c["rider_id"]: c for c in cur
-                if not c.get("class") and (not c.get("series") or c["series"] == ser)}
+                if c["rider_id"] not in placed
+                and (not c.get("series") or c["series"] == ser)}
     # Last season's riders of this class: this series first, then the other
     # series' top riders of the same class who didn't race this one. A
     # Supercross 250 region for an outdoors-only rider is unknown, so he is
@@ -1567,6 +1579,9 @@ def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids, other=None):
             continue
         d = new_deal.get(rid)
         last_team = (prev.get(rid) or {}).get("team")
+        # Entered the OTHER series this season (an A1 entry list): said as
+        # such, not as a class confirmed here.
+        other_series = sorted(s for s in entered.get(rid, {}) if s != ser)
         not_confirmed.append({
             "rider_id": rid, "full_name": r["full_name"],
             "headshot_url": r.get("headshot_url"),
@@ -1577,6 +1592,7 @@ def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids, other=None):
             "new_team": d.get("team") if d else None,
             "new_make": d.get("manufacturer") if d else None,
             "re_signed": bool(d and _team_key(d.get("team")) == _team_key(last_team)),
+            "entered_other": other_series,
         })
     return {"confirmed": confirmed, "not_confirmed": not_confirmed, "retired": retired}
 
@@ -1617,7 +1633,7 @@ def season_lineup(series: str, klass: str = Query(..., alias="class")):
     cur = query(
         """
         SELECT rs.rider_id, rs.team, rs.manufacturer, rs.class, rs.series, rs.kind,
-               rs.source, r.full_name,
+               rs.source, rs.announced_class, r.full_name,
                COALESCE(r.headshot_override, r.headshot_racerx, r.headshot_url) AS headshot_url,
                (SELECT min(st.position) FROM standings st
                   JOIN seasons se ON se.id = st.season_id
@@ -1648,7 +1664,28 @@ def season_lineup(series: str, klass: str = Query(..., alias="class")):
         JOIN riders  r  ON r.id  = st.rider_id
         WHERE s.abbrev IN ('SX', 'MX') AND s.abbrev <> %s AND se.year = %s
         """, [ser, nxt - 1])
-    out = build_lineup(ser, klass, std, cur, prev, bikes, retired_ids, other)
+    entered = {}
+    for r in query(
+            """
+            SELECT rider_id, series,
+                   class || CASE WHEN region IS NOT NULL THEN ' ' || region ELSE '' END AS cls
+            FROM rider_entries WHERE year = %s
+            UNION
+            SELECT res.rider_id, s.abbrev,
+                   sess.class || CASE WHEN s.abbrev = 'SX' AND sess.class = '250'
+                                        AND e.region_250 IN ('E', 'W')
+                                      THEN CASE e.region_250 WHEN 'E' THEN ' East' ELSE ' West' END
+                                      ELSE '' END
+            FROM results res
+            JOIN sessions sess ON sess.id = res.session_id
+            JOIN events   e    ON e.id    = sess.event_id
+            JOIN seasons  se   ON se.id   = e.season_id
+            JOIN series   s    ON s.id    = se.series_id
+            WHERE se.year = %s AND res.rider_id IS NOT NULL
+              AND sess.class IN ('450', '250', 'WMX')
+            """, [nxt, nxt]):
+        entered.setdefault(r["rider_id"], {}).setdefault(r["series"], r["cls"])
+    out = build_lineup(ser, klass, std, cur, prev, bikes, retired_ids, other, entered)
     return dict(out, year=nxt, series=ser, **{"class": klass})
 
 
