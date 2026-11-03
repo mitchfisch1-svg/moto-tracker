@@ -52,3 +52,22 @@ def test_talk_of_a_move_is_a_rumour(title):
 def test_a_signing_still_names_its_team():
     assert classify("Cooper Webb Signs Multi-Year Deal with Team Tedder Husqvarna",
                     "", TEAMS) == ("signing", "Team Tedder Husqvarna")
+
+
+def test_a_past_title_is_not_next_seasons_class():
+    from src.pipeline.watch_moves import class_named
+    assert class_named("Colt Nichols Joins ROKiT Partzilla PRMX for 2027",
+                       "the team announced the signing of former 250SX East Champion "
+                       "Colt Nichols") is None
+    assert class_named("Official: Quad Lock Honda sign Michael Mosiman for 2027",
+                       "will join the team's 250 program for the 2027 season") == "250"
+    assert class_named("Beta Signs Shane McElrath to Two-Year 450SX Supercross Contract", "") == "450"
+    # two classes named: not for us to pick
+    assert class_named("Team X signs Y", "a 450 veteran joins the 250 program") is None
+
+
+def test_the_headlines_team_beats_the_one_he_is_leaving():
+    teams = {"quad lock honda": "Quad Lock Honda",
+             "troy lee designs/red bull ducati": "TLD Ducati"}
+    assert classify("Official: Joey Savatgy Signs Multi-Year Deal with Troy Lee Designs/Red Bull Ducati",
+                    "after three seasons at Quad Lock Honda", teams) == ("signing", "TLD Ducati")

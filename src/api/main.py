@@ -1423,8 +1423,14 @@ def season_preview(series: str):
     series, the confirmed rider moves and the retirements. Only what is
     known — no table of zeros, no guessed classes. `null` when there is no
     coming season (its calendar is not in) or this series has already begun
-    it (its standings exist; then it is an ordinary season)."""
+    it (its standings exist; then it is an ordinary season). Always `null` for
+    SMX: its field is whoever qualifies on points, so nobody can be confirmed
+    in advance, and its `standings` rows are the seeding (a 2027 chip appeared
+    when the 2027 dates arrived, listing Hunter Lawrence as "2026: P1"; he
+    finished third)."""
     ser = series.upper()
+    if ser == "SMX":
+        return None
     have = query(
         """
         SELECT max(se.year) AS y FROM standings st
@@ -1692,9 +1698,9 @@ def season_lineup(series: str, klass: str = Query(..., alias="class")):
     """One class's lineup for the coming season, before it has a result:
     confirmed riders (with what changed), last season's riders not confirmed
     yet, and retirements. `null` once the season has standings — then the
-    real table is the answer."""
+    real table is the answer. Always `null` for SMX (see season_preview)."""
     ser = series.upper()
-    nxt = _preview_year(ser)
+    nxt = None if ser == "SMX" else _preview_year(ser)
     if nxt is None:
         return None
     std = query(

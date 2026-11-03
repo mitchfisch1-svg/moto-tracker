@@ -83,6 +83,15 @@ _TEAM_ALIASES = {
     "team tedder husqvarna": "Team Tedder Husqvarna",
     "quad lock honda": "Quad Lock Honda",
     "quadlock honda": "Quad Lock Honda",
+    # 10-27: four outlets carried Colt Nichols's signing and none could apply it,
+    # because no rider had raced for this name yet.
+    "rokit partzilla prmx": "ROKiT Partzilla PRMX Yamaha",
+    "partzilla rokit prmx": "ROKiT Partzilla PRMX Yamaha",
+    "troy lee designs/red bull ducati": "Troy Lee Designs Red Bull Ducati Factory Racing",
+    "hep suzuki": "Pipes Motorsports Group Suzuki",
+    "hep motorsports suzuki": "Pipes Motorsports Group Suzuki",
+    "pipes motorsports": "Pipes Motorsports Group Suzuki",
+    "pmg suzuki": "AWM Fulfillment PMG Suzuki",
 }
 
 
@@ -123,15 +132,34 @@ def _team_in(text, teams):
     return best[1] if best else None
 
 
+def class_named(title, summary):
+    """The class an article says a rider will race, or None. The headline
+    decides; a summary only if it names one class and not as a past title:
+    "former 250SX East Champion" is what Colt Nichols was, on a YZ450 now."""
+    m = re.search(r"(450|250)(?=\b|sx|mx)", title or "", re.I)
+    if m:
+        return m.group(1)
+    found = set()
+    for m in re.finditer(r"(450|250)(?=\b|sx|mx)", summary or "", re.I):
+        around = (summary[max(0, m.start() - 20):m.start()]
+                  + summary[m.end():m.end() + 30]).lower()
+        if "champ" in around or "former" in around or "rookie" in around:
+            continue
+        found.add(m.group(1))
+    return found.pop() if len(found) == 1 else None
+
+
 def classify(title, summary, teams):
     """(kind, team) for one article about one rider."""
     if _RUMOUR.search(title or ""):
         return "rumour", None
     if _SIGN.search(title or ""):
-        return "signing", _team_in(f"{title} {summary or ''}", teams)
+        # The headline first: a summary also names the team he is LEAVING
+        # (Savatgy's Ducati signing was filed under Quad Lock Honda).
+        return "signing", _team_in(title, teams) or _team_in(summary, teams)
     if (_STEP_UP.search(title or "") and re.search(r"450", title or "")
             and not _ONE_OFF.search(f"{title} {summary or ''}")):
-        return "class", _team_in(f"{title} {summary or ''}", teams)
+        return "class", _team_in(title, teams) or _team_in(summary, teams)
     if _LEAVE.search(title or "") or _LEAVE.search(summary or ""):
         return "departure", None
     return None, None
@@ -176,12 +204,10 @@ def scan(conn, today=None, dry_run=False):
             kind, team = classify(title, summary, teams)
             if not kind:
                 continue
-            # The class the ARTICLE names (headline, then summary), or none:
-            # last season's class copied forward would be a guess.
-            c = re.search(r"(450|250)(?=\b|sx|mx|\s?sx-?f)", f"{title} {summary or ''}", re.I)
-            if kind == "class":
-                c = re.search(r"(450)", title or "")
-            found.append((aid, rid, kind, team, c.group(1) if c else None,
+            # The class the ARTICLE names, or none: last season's class
+            # copied forward would be a guess.
+            found.append((aid, rid, kind, team,
+                          "450" if kind == "class" else class_named(title, summary),
                           source_id, title, url))
 
     # A signing goes in when enough different outlets report the same rider

@@ -137,8 +137,13 @@ def load_events(cur):
              FROM events e
              JOIN seasons sn ON sn.id = e.season_id
              JOIN series s ON s.id = sn.series_id
-            WHERE sn.year = 2026
-            ORDER BY e.start_time_utc"""
+            WHERE sn.year >= %s
+            ORDER BY e.start_time_utc""",
+        # Last season too: its closed rounds are how we recognise the site still
+        # serving last season's final, which it does until the new opener goes
+        # on track. This was `= 2026`: from January it would have seen no 2027
+        # round at all, and every race-day adoption would have failed.
+        (datetime.date.today().year - 1,),
     )
     cols = [c.name for c in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -228,7 +233,10 @@ def main():
             events = load_events(cur)
             target = pick_target(events, args.event_id)
             if target is None:
-                say(BAD, "no unfinished 2026 event to attach this to")
+                # The off-season before the next calendar is in. Not a fault:
+                # reported as one, it turned this job red every weekend, where
+                # a real failure would never have been noticed.
+                say(INFO, "no unfinished event to attach this to; nothing to do")
                 return finish()
 
             done = finished_ids(events)

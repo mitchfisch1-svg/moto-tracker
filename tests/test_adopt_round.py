@@ -176,3 +176,11 @@ def test_a_naive_start_time_is_treated_as_utc_not_crashed_on():
 def test_adoption_is_gated_on_the_site_having_moved_on(theirs, ours, done,
                                                        expected):
     assert adopt._site_shows_this_round(ours, theirs, done) is expected
+
+
+def test_the_season_is_never_hard_coded():
+    """`sn.year = 2026` would have blinded this to every 2027 round."""
+    import re
+    src = (ROOT / "scripts" / "adopt_round.py").read_text(encoding="utf-8")
+    code = "\n".join(l.split("#")[0] for l in src.splitlines())
+    assert not re.search(r"year\s*=\s*20\d\d", code)

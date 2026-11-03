@@ -71,3 +71,10 @@ def test_no_preview_without_a_calendar(monkeypatch):
     monkeypatch.setattr(main, "query", _fake_query(None))
     assert main._rider_preview(5, {"retired_after": None},
                                [{"series": "SX", "year": 2027}], [2027]) is None
+
+
+def test_smx_has_no_preview_its_field_is_earned_on_points():
+    """A 2027 chip appeared when SMX's dates arrived, showing the seeding table's
+    "2026: P1" for Hunter Lawrence, who finished third."""
+    assert main.season_preview("SMX") is None
+    assert main.season_lineup("SMX", "450") is None
