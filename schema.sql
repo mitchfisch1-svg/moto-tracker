@@ -194,6 +194,12 @@ ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_url TEXT;
 -- were big enough that a cold launch showed number plates instead of faces.
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_override TEXT;
 ALTER TABLE riders ADD COLUMN IF NOT EXISTS headshot_racerx TEXT;
+-- A confirmed departure with no new team yet (Sexton left Kawasaki 10-23 and
+-- his page kept saying Monster Energy Kawasaki). Only true while riders.team
+-- is still that team, so a new signing ends it with nothing to clear.
+ALTER TABLE riders ADD COLUMN IF NOT EXISTS left_team TEXT;
+ALTER TABLE riders ADD COLUMN IF NOT EXISTS left_on DATE;
+ALTER TABLE riders ADD COLUMN IF NOT EXISTS left_source TEXT;
 -- Each round's official finish (the series-points table), for a rider's
 -- season line: rounds, best and average ROUND finish. Written by
 -- apply_official_standings; null until it has run.

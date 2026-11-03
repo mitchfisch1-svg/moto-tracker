@@ -1228,9 +1228,21 @@ def news_top(limit: int = Query(3, le=6)):
 
 
 # --- riders ----------------------------------------------------------------
+def _current_team(row):
+    """A rider who has left his team and signed nowhere new has no current
+    team: Sexton left Kawasaki on 10-23 and his page kept saying Monster Energy
+    Kawasaki. True only while `team` is still the team he left, so a new
+    signing ends it with nothing to clear. Older app builds just show no team."""
+    if row.get("left_team") and _team_key(row["left_team"]) == _team_key(row.get("team")):
+        row.update(team=None, manufacturer=None)
+    else:
+        row.update(left_team=None, left_on=None)
+    return row
+
+
 @app.get("/riders")
 def riders(search: str | None = None, limit: int = Query(25, le=100)):
-    sql = ("SELECT id, full_name, number, team, manufacturer, country "
+    sql = ("SELECT id, full_name, number, team, manufacturer, country, left_team, left_on "
            "FROM riders WHERE TRUE")
     params = []
     if search:
@@ -1238,7 +1250,7 @@ def riders(search: str | None = None, limit: int = Query(25, le=100)):
         params.append(f"%{search}%")
     sql += " ORDER BY full_name LIMIT %s"
     params.append(limit)
-    return query(sql, params)
+    return [_current_team(r) for r in query(sql, params)]
 
 
 @app.get("/riders/{rider_id}")
@@ -1246,7 +1258,7 @@ def rider(rider_id: int, year: int | None = None):
     info = query(
         "SELECT id, full_name, number, team, manufacturer, hometown, "
         "COALESCE(headshot_override, headshot_racerx, headshot_url) AS headshot_url, country, "
-        "retired_after, "
+        "retired_after, left_team, left_on, "
         # The season the team above is from: over the winter it is next
         # season's announced team, and the app says so.
         "(SELECT max(year) FROM rider_seasons WHERE rider_id = riders.id) AS team_season "
@@ -1255,6 +1267,7 @@ def rider(rider_id: int, year: int | None = None):
     )
     if not info:
         raise HTTPException(status_code=404, detail="rider not found")
+    _current_team(info[0])
     standings_rows = query(
         """
         SELECT s.abbrev AS series, st.class, st.position, st.points,
@@ -1544,7 +1557,7 @@ _OTHER_SERIES_TOP = 20     # a rider from the other series' top 20 is someone pe
 
 
 def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids, other=None,
-                 entered=None):
+                 entered=None, left=None):
     """One class's coming-season lineup, from what is known. Pure, so it can
     be tested without a database.
 
@@ -1676,6 +1689,7 @@ def build_lineup(ser, cls, std, cur, prev, bikes, retired_ids, other=None,
             "new_make": d.get("manufacturer") if d else None,
             "re_signed": bool(d and _team_key(d.get("team")) == _team_key(last_team)),
             "entered_other": other_series,
+            "left_team": (left or {}).get(rid),
         })
     return {"confirmed": confirmed, "not_confirmed": not_confirmed, "retired": retired}
 
@@ -1768,7 +1782,10 @@ def season_lineup(series: str, klass: str = Query(..., alias="class")):
               AND sess.class IN ('450', '250', 'WMX')
             """, [nxt, nxt]):
         entered.setdefault(r["rider_id"], {}).setdefault(r["series"], r["cls"])
-    out = build_lineup(ser, klass, std, cur, prev, bikes, retired_ids, other, entered)
+    left = {r["id"]: r["left_team"] for r in query(
+        "SELECT id, team, left_team FROM riders WHERE left_team IS NOT NULL")
+        if _team_key(r["left_team"]) == _team_key(r["team"])}
+    out = build_lineup(ser, klass, std, cur, prev, bikes, retired_ids, other, entered, left)
     return dict(out, year=nxt, series=ser, **{"class": klass})
 
 

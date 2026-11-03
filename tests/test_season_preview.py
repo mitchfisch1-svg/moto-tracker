@@ -78,3 +78,23 @@ def test_smx_has_no_preview_its_field_is_earned_on_points():
     "2026: P1" for Hunter Lawrence, who finished third."""
     assert main.season_preview("SMX") is None
     assert main.season_lineup("SMX", "450") is None
+
+
+def test_a_rider_who_left_his_team_has_no_current_team():
+    row = main._current_team({"team": "Monster Energy Kawasaki", "manufacturer": "Kawasaki",
+                              "left_team": "Monster Energy Kawasaki", "left_on": "2026-10-23"})
+    assert row["team"] is None and row["manufacturer"] is None
+    assert row["left_team"] == "Monster Energy Kawasaki" and row["left_on"] == "2026-10-23"
+
+
+def test_a_new_signing_ends_it_with_nothing_to_clear():
+    row = main._current_team({"team": "Red Bull KTM Factory Racing", "manufacturer": "KTM",
+                              "left_team": "Monster Energy Kawasaki", "left_on": "2026-10-23"})
+    assert row["team"] == "Red Bull KTM Factory Racing" and row["manufacturer"] == "KTM"
+    assert row["left_team"] is None and row["left_on"] is None
+
+
+def test_a_rider_who_never_left_is_untouched():
+    row = main._current_team({"team": "Honda HRC", "manufacturer": "Honda",
+                              "left_team": None, "left_on": None})
+    assert row["team"] == "Honda HRC" and row["left_team"] is None

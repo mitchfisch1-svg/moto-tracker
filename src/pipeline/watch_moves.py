@@ -31,6 +31,8 @@ rider_move_candidates, so the pending ones can be reviewed:
     python -m src.pipeline.watch_moves --pending  # what is waiting for a person
     python -m src.pipeline.watch_moves --reviewed 12 40   # dealt with
     python -m src.pipeline.watch_moves --ignore 63        # not a move
+    python -m src.pipeline.watch_moves --left 96 --on 2026-10-23 --source URL
+                                                          # left his team, no new one
 """
 
 import argparse
@@ -287,6 +289,21 @@ def scan(conn, today=None, dry_run=False):
     return applied, decided
 
 
+def record_left(conn, rider_id, on, source):
+    """A person's confirmation that a rider has left his current team. Never
+    automatic: "leaving" headlines are too often about a race, or a staff
+    member, or a rider in another series."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE riders SET left_team = team, left_on = %s, left_source = %s
+            WHERE id = %s AND team IS NOT NULL RETURNING full_name, left_team
+            """, (on, source, rider_id))
+        row = cur.fetchone()
+    conn.commit()
+    return row
+
+
 def mark(conn, ids, status):
     """A person's decision on candidates: 'reviewed' (true, and dealt with)
     or 'ignored' (not a move). The hourly scan leaves these alone."""
@@ -324,8 +341,15 @@ def main():
                     help="mark candidates dealt with (ids from --pending)")
     ap.add_argument("--ignore", type=int, nargs="+", metavar="ID",
                     help="mark candidates as not a move")
+    ap.add_argument("--left", type=int, metavar="RIDER_ID",
+                    help="this rider has left his current team (with --on, --source)")
+    ap.add_argument("--on", help="date of the departure, YYYY-MM-DD")
+    ap.add_argument("--source", help="URL of the announcement")
     args = ap.parse_args()
     with get_connection() as conn:
+        if args.left:
+            print(record_left(conn, args.left, args.on, args.source))
+            return
         if args.reviewed or args.ignore:
             for ids, st in ((args.reviewed, "reviewed"), (args.ignore, "ignored")):
                 if ids:

@@ -41,7 +41,7 @@ load_dotenv(ROOT / ".env")
 from src.names import titlecase_name                    # noqa: E402
 from src.config import get_database_url  # noqa: E402
 from src.api.main import (                               # noqa: E402
-    _name_key, _overall_block_is_settled)
+    _name_key, _overall_block_is_settled, _team_key)
 from src import series_tables                            # noqa: E402
 
 API = os.environ.get("MXT_API", "https://moto-tracker-api.onrender.com")
@@ -448,6 +448,23 @@ def _standings_match_official(cur, http):
             if s.get("bike") and o.get("manufacturer") != s["bike"]:
                 bad.append(f"{abbrev} {cls} {s['rider']}: official bike "
                            f"{s['bike']}, we show {o.get('manufacturer')}")
+    return bad
+
+
+@check("a rider who left his team is not served under it",
+       "Chase Sexton left Kawasaki on 10-23 and his page still said Monster "
+       "Energy Kawasaki ten days later")
+def _left_team_not_served(cur, http):
+    if not http:
+        return []
+    cur.execute("SELECT id, full_name, team, left_team FROM riders WHERE left_team IS NOT NULL")
+    bad = []
+    for rid, name, team, left in cur.fetchall():
+        d = requests.get(f"{API}/riders/{rid}", headers=UA, timeout=60).json()["rider"]
+        still = _team_key(team) == _team_key(left)
+        if still and (d.get("team") or d.get("left_team") != left):
+            bad.append(f"{name}: left {left}, served team={d.get('team')!r} "
+                       f"left_team={d.get('left_team')!r}")
     return bad
 
 

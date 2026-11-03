@@ -142,3 +142,9 @@ def test_an_entry_list_region_puts_him_on_one_250_list():
     west = build_lineup("SX", "250 West", [], [rider], {}, {}, set(), None, {5: {"SX": "250 West"}})
     east = build_lineup("SX", "250 East", [], [rider], {}, {}, set(), None, {5: {"SX": "250 West"}})
     assert names(west["confirmed"]) == ["Some Rider"] and names(east["confirmed"]) == []
+
+
+def test_a_rider_who_left_his_team_says_so_on_the_lineup():
+    out = build_lineup("SX", "450", STD_SX, CUR, PREV, {}, {3}, None, None, {1: "Some Team"})
+    row = next(r for r in out["not_confirmed"] if r["full_name"] == "Ken Roczen")
+    assert row["left_team"] == "Some Team"
