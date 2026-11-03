@@ -457,12 +457,15 @@ def _standings_match_official(cur, http):
 def _left_team_not_served(cur, http):
     if not http:
         return []
-    cur.execute("SELECT id, full_name, team, left_team FROM riders WHERE left_team IS NOT NULL")
+    cur.execute("SELECT id, full_name, left_team FROM riders WHERE left_team IS NOT NULL")
     bad = []
-    for rid, name, team, left in cur.fetchall():
-        d = requests.get(f"{API}/riders/{rid}", headers=UA, timeout=60).json()["rider"]
-        still = _team_key(team) == _team_key(left)
-        if still and (d.get("team") or d.get("left_team") != left):
+    for rid, name, left in cur.fetchall():
+        # Past the response cache: a page read just before --left is no failure.
+        d = requests.get(f"{API}/riders/{rid}", params={"audit": int(time.time())},
+                         headers=UA, timeout=60).json()["rider"]
+        served = _team_key(d.get("team"))
+        # "in": the same team respelled ("... Kawasaki Racing") is still that team.
+        if _team_key(left) in served if served else d.get("left_team") != left:
             bad.append(f"{name}: left {left}, served team={d.get('team')!r} "
                        f"left_team={d.get('left_team')!r}")
     return bad

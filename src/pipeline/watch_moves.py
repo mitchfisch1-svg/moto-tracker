@@ -167,10 +167,20 @@ def classify(title, summary, teams):
     return None, None
 
 
+def _without_team(teams, left):
+    """Known teams minus the one a rider has left. "Chase Sexton Signs with KTM"
+    over a summary naming Kawasaki would file him straight back under it, end
+    nothing, and then block the real signing as already known."""
+    return {name: canon for name, canon in teams.items() if _key(left) not in _key(canon)}
+
+
 def scan(conn, today=None, dry_run=False):
     season = next_season(today)
     with conn.cursor() as cur:
         teams = _teams(cur)
+        # Riders marked as having left a team and still showing no new one.
+        cur.execute("SELECT id, team, left_team FROM riders WHERE left_team IS NOT NULL")
+        left = {rid: lt for rid, t, lt in cur.fetchall() if _key(t) == _key(lt)}
         # Riders who raced a championship class this season or last: the
         # people MXT shows. A name we have never seen race is not ours to track.
         cur.execute(
@@ -195,17 +205,24 @@ def scan(conn, today=None, dry_run=False):
     for aid, source_id, title, summary, url in articles:
         tkey = _key(title)
         low = fold(title or "")
+        named = []
         for rid, (name, nkey, cls) in riders.items():
             # The whole name, AND the surname as a word: "Kelley" alone must
             # not make Ben Kelley's off-road deal into Derek Kelley's.
             words = [w for w in name.split() if w.lower().strip(".") not in
                      ("jr", "sr", "ii", "iii", "iv")]
             surname = fold(words[-1]) if words else ""
-            if nkey not in tkey or not re.search(rf"\b{re.escape(surname)}\b", low):
-                continue
-            kind, team = classify(title, summary, teams)
+            if nkey in tkey and re.search(rf"\b{re.escape(surname)}\b", low):
+                named.append(rid)
+        for rid in named:
+            kind, team = classify(title, summary,
+                                  _without_team(teams, left[rid]) if rid in left else teams)
             if not kind:
                 continue
+            # "Prado Joins Red Bull KTM After Chase Sexton Talks End" is about
+            # Prado. A free agent is named in other riders' news all winter.
+            if rid in left and len(named) > 1:
+                team = None
             # The class the ARTICLE names, or none: last season's class
             # copied forward would be a guess.
             found.append((aid, rid, kind, team,
@@ -292,13 +309,33 @@ def scan(conn, today=None, dry_run=False):
 def record_left(conn, rider_id, on, source):
     """A person's confirmation that a rider has left his current team. Never
     automatic: "leaving" headlines are too often about a race, or a staff
-    member, or a rider in another series."""
+    member, or a rider in another series.
+
+    Refuses a rider with a team recorded for a later season: his page would say
+    he left while his 2027 card and the lineup still put him on it."""
     with conn.cursor() as cur:
+        cur.execute(
+            "SELECT year, team FROM rider_seasons "
+            "WHERE rider_id = %s AND year > %s AND team IS NOT NULL",
+            (rider_id, on.year))
+        later = cur.fetchall()
+        if later:
+            raise ValueError(f"rider {rider_id} has a later season recorded, fix it first: {later}")
         cur.execute(
             """
             UPDATE riders SET left_team = team, left_on = %s, left_source = %s
             WHERE id = %s AND team IS NOT NULL RETURNING full_name, left_team
             """, (on, source, rider_id))
+        row = cur.fetchone()
+    conn.commit()
+    return row
+
+
+def clear_left(conn, rider_id):
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE riders SET left_team = NULL, left_on = NULL, left_source = NULL "
+            "WHERE id = %s RETURNING full_name, team", (rider_id,))
         row = cur.fetchone()
     conn.commit()
     return row
@@ -345,10 +382,22 @@ def main():
                     help="this rider has left his current team (with --on, --source)")
     ap.add_argument("--on", help="date of the departure, YYYY-MM-DD")
     ap.add_argument("--source", help="URL of the announcement")
+    ap.add_argument("--clear-left", type=int, metavar="RIDER_ID",
+                    help="undo --left: this rider is back to showing his team")
     args = ap.parse_args()
+    if args.left and not (args.on and args.source):
+        ap.error("--left needs --on and --source")
     with get_connection() as conn:
-        if args.left:
-            print(record_left(conn, args.left, args.on, args.source))
+        if args.left or args.clear_left:
+            try:
+                row = (clear_left(conn, args.clear_left) if args.clear_left else
+                       record_left(conn, args.left, datetime.date.fromisoformat(args.on),
+                                   args.source))
+            except ValueError as e:
+                sys.exit(str(e))
+            if not row:
+                sys.exit("no such rider, or he has no team to leave")
+            print(row)
             return
         if args.reviewed or args.ignore:
             for ids, st in ((args.reviewed, "reviewed"), (args.ignore, "ignored")):

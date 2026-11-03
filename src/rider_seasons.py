@@ -72,7 +72,18 @@ def record(conn, year, rows, source, note=None):
                     number = COALESCE(rs.number, r.number),
                     team_changed_at = CASE WHEN r.team IS DISTINCT FROM rs.team
                                            AND rs.team IS NOT NULL
-                                           THEN now() ELSE r.team_changed_at END
+                                           THEN now() ELSE r.team_changed_at END,
+                    -- A team for a season after he left ends that departure for
+                    -- good, even if it is the same team: he is back with them.
+                    left_team = CASE WHEN rs.team IS NOT NULL
+                                      AND rs.year > EXTRACT(YEAR FROM r.left_on)
+                                     THEN NULL ELSE r.left_team END,
+                    left_source = CASE WHEN rs.team IS NOT NULL
+                                        AND rs.year > EXTRACT(YEAR FROM r.left_on)
+                                       THEN NULL ELSE r.left_source END,
+                    left_on = CASE WHEN rs.team IS NOT NULL
+                                    AND rs.year > EXTRACT(YEAR FROM r.left_on)
+                                   THEN NULL ELSE r.left_on END
                 FROM rider_seasons rs
                 WHERE rs.rider_id = r.id AND r.id = %s AND rs.year = %s
                   AND rs.year = (SELECT max(year) FROM rider_seasons
